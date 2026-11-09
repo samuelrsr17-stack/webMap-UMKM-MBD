@@ -43,6 +43,7 @@ export const umkmSchema = z.object({
   small: nonNegativeNumber("Usaha kecil", true),
   medium: nonNegativeNumber("Usaha menengah", true),
   source: z.string().trim().max(160, "Sumber maksimal 160 karakter."),
+  description: z.string().trim().max(500, "Deskripsi maksimal 500 karakter."),
 });
 
 export const economySchema = z.object({

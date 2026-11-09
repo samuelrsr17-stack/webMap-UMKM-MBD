@@ -143,6 +143,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .legend-district { background: #b6d6c9; border: 1px solid #6fae9a; }
 .legend-village { background: #e9f2ee; border: 1px solid #378d79; }
 .legend-point { border-radius: 50% !important; background: #e58d3f; border: 2px solid #fff; box-shadow: 0 0 0 1px #e58d3f; }
+.legend-point--mikro { background: #e58d3f; box-shadow: 0 0 0 1px #e58d3f; }
+.legend-point--kecil { background: #6188dc; box-shadow: 0 0 0 1px #6188dc; }
+.legend-point--menengah { background: #37a883; box-shadow: 0 0 0 1px #37a883; }
 .map-frame { height: min(62vh, 650px); min-height: 390px; position: relative; background: #eaf0ee; }
 .leaflet-map { width: 100%; height: 100%; z-index: 1; background: #eaf0ee; }
 .map-loading { width: 100%; height: 100%; min-height: 390px; display: grid; place-items: center; color: #70837d; background: #eaf0ee; font-size: 12px; }
@@ -152,6 +155,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .leaflet-container a { color: #176f60; }
 .leaflet-popup-content-wrapper { border-radius: 9px; }
 .leaflet-popup-content { font-size: 11px; line-height: 1.6; }
+.umkm-map-description { display: inline-block; max-width: 240px; white-space: normal; }
 .leaflet-div-icon.point-marker-icon { border: 0; background: transparent; }
 .point-marker-icon span { display: block; width: 14px; height: 14px; border: 2px solid #fff; border-radius: 50%; background: #8464ce; box-shadow: 0 1px 5px #172a2a80; }
 .point-marker-icon--mikro span { background: #e58d3f; }

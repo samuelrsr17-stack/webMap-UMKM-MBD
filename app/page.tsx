@@ -449,6 +449,7 @@ export default function HomePage() {
             village_code: village.code, year,
             micro: get(cells, "mikro"), small: get(cells, "kecil"), medium: get(cells, "menengah"),
             source: get(cells, "sumber"),
+            description: indexes.has("deskripsi") ? get(cells, "deskripsi") : "",
           });
           if (!parsed.success) throw new Error(`Baris ${index + 2}: ${parsed.error.issues[0]?.message ?? "Data tidak valid."}`);
           payloads.push(parsed.data);
@@ -573,10 +574,10 @@ export default function HomePage() {
     let headings: string[];
     let rows: string[][];
     if (activeTab === "umkm") {
-      headings = ["desa", "kecamatan", "mikro", "kecil", "menengah", "sumber"];
+      headings = ["desa", "kecamatan", "mikro", "kecil", "menengah", "sumber", "deskripsi"];
       rows = visibleUmkm.map((row) => {
         const village = villageByCode.get(row.village_code);
-        return [village?.name ?? row.village_code, village?.kecamatan ?? "", String(row.micro), String(row.small), String(row.medium), row.source];
+        return [village?.name ?? row.village_code, village?.kecamatan ?? "", String(row.micro), String(row.small), String(row.medium), row.source, row.description];
       });
     } else if (activeTab === "economy") {
       headings = ["desa", "kecamatan", "omzet", "tenaga_kerja", "investasi"];
@@ -714,12 +715,12 @@ export default function HomePage() {
             <div className="map-card">
               <div className="map-card-head">
                 <div><div className="section-title"><span className="map-pulse" /> Peta sebaran</div><p>Batas desa dan titik lapangan tersimpan.</p></div>
-                <div className="map-legend"><span><i className="legend-district" /> Kecamatan</span><span><i className="legend-village" /> Desa</span><span><i className="legend-point" /> Titik</span></div>
+                <div className="map-legend"><span><i className="legend-district" /> Kecamatan</span><span><i className="legend-village" /> Desa</span><span><i className="legend-point legend-point--mikro" /> Mikro</span><span><i className="legend-point legend-point--kecil" /> Kecil</span><span><i className="legend-point legend-point--menengah" /> Menengah</span></div>
               </div>
               <div className="map-frame">
-                <MapCanvas villages={villages} points={visiblePoints} villageByCode={villageByCode} canEdit={Boolean(session) && !busy} onMovePoint={handleMovePoint} />
+                <MapCanvas villages={villages} points={visiblePoints} umkm={umkm} villageByCode={villageByCode} canEdit={Boolean(session) && !busy} onMovePoint={handleMovePoint} />
               </div>
-              <div className="map-foot"><span><Layers3 size={15} /> Batas administrasi 17 kecamatan / 118 desa</span><span>{visiblePoints.length} titik ditampilkan · {session ? "Geser pin untuk memindahkan lokasi" : "Masuk untuk memindahkan pin"}</span></div>
+              <div className="map-foot"><span><Layers3 size={15} /> Batas administrasi 17 kecamatan / 118 desa</span><span>{visiblePoints.length} titik lapangan · pin UMKM mengikuti data terbaru per desa</span></div>
             </div>
           )}
 
@@ -932,6 +933,7 @@ function UmkmFields({ row }: { row: UmkmRecord | null }) {
   return <>
     <div className="field-grid field-grid--three"><label className="field"><span>Mikro</span><input name="micro" type="number" min="0" step="1" defaultValue={row?.micro ?? 0} required /></label><label className="field"><span>Kecil</span><input name="small" type="number" min="0" step="1" defaultValue={row?.small ?? 0} required /></label><label className="field"><span>Menengah</span><input name="medium" type="number" min="0" step="1" defaultValue={row?.medium ?? 0} required /></label></div>
     <label className="field"><span>Sumber data</span><input name="source" maxLength={160} defaultValue={row?.source ?? ""} placeholder="Contoh: Pendataan desa" /></label>
+    <label className="field"><span>Deskripsi pin peta</span><textarea name="description" rows={3} maxLength={500} defaultValue={row?.description ?? ""} placeholder="Tulis keterangan yang akan muncul saat pin UMKM diklik…" /></label>
   </>;
 }
 

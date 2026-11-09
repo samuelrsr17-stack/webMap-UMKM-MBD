@@ -4,16 +4,23 @@ import { useEffect } from "react";
 import * as L from "leaflet";
 import { GeoJSON, MapContainer, Marker, Popup, TileLayer, Tooltip, useMap } from "react-leaflet";
 import type { Feature, Geometry } from "geojson";
-import type { MapPoint } from "@/lib/database.types";
+import type { MapPoint, UmkmRecord } from "@/lib/database.types";
 import { categoryLabels, type VillageCollection, type VillageProperties } from "@/lib/validation";
 
 interface MapCanvasProps {
   villages: VillageCollection | null;
   points: MapPoint[];
+  umkm: UmkmRecord[];
   villageByCode: ReadonlyMap<string, VillageProperties>;
   canEdit: boolean;
   onMovePoint: (id: string, lat: number, lng: number) => Promise<boolean>;
 }
+
+const umkmCategories = [
+  { field: "micro", category: "mikro", label: "Mikro", offset: -16 },
+  { field: "small", category: "kecil", label: "Kecil", offset: 0 },
+  { field: "medium", category: "menengah", label: "Menengah", offset: 16 },
+] as const;
 
 function FitMbdBounds({ villages }: { villages: VillageCollection | null }) {
   const map = useMap();
@@ -26,7 +33,13 @@ function FitMbdBounds({ villages }: { villages: VillageCollection | null }) {
   return null;
 }
 
-export default function MbdMap({ villages, points, villageByCode, canEdit, onMovePoint }: MapCanvasProps) {
+export default function MbdMap({ villages, points, umkm, villageByCode, canEdit, onMovePoint }: MapCanvasProps) {
+  const latestUmkmByVillage = new Map<string, UmkmRecord>();
+  for (const record of umkm) {
+    const current = latestUmkmByVillage.get(record.village_code);
+    if (!current || record.year > current.year) latestUmkmByVillage.set(record.village_code, record);
+  }
+
   return (
     <MapContainer
       center={[-8.15, 127.9]}
@@ -90,6 +103,28 @@ export default function MbdMap({ villages, points, villageByCode, canEdit, onMov
           </Marker>
         );
       })}
+      {[...latestUmkmByVillage.values()].flatMap((record) => {
+        const village = villageByCode.get(record.village_code);
+        if (!village) return [];
+        return umkmCategories
+          .filter(({ field }) => record[field] > 0)
+          .map(({ field, category, label, offset }) => (
+            <Marker
+              key={`umkm-${record.village_code}-${category}`}
+              position={village.label}
+              icon={pointIcon(category, offset)}
+              zIndexOffset={offset}
+            >
+              <Tooltip direction="top">{village.name} · UMKM {label}</Tooltip>
+              <Popup>
+                <strong>UMKM {label} · {new Intl.NumberFormat("id-ID").format(record[field])} usaha</strong>
+                <br />{village.name} · {village.kecamatan}
+                <br />Tahun data: {record.year}
+                {record.description && <><br /><span className="umkm-map-description">{record.description}</span></>}
+              </Popup>
+            </Marker>
+          ));
+      })}
     </MapContainer>
   );
 }
@@ -101,11 +136,11 @@ function districtColor(code: string): string {
   return colors[Math.abs(hash) % colors.length];
 }
 
-function pointIcon(category: MapPoint["category"]): L.DivIcon {
+function pointIcon(category: MapPoint["category"], horizontalOffset = 0): L.DivIcon {
   return L.divIcon({
     className: `point-marker-icon point-marker-icon--${category}`,
     html: "<span></span>",
     iconSize: [18, 18],
-    iconAnchor: [9, 9],
+    iconAnchor: [9 - horizontalOffset, 9],
   });
 }

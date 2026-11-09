@@ -31,6 +31,7 @@ export type UmkmRecord = {
   small: number;
   medium: number;
   source: string;
+  description: string;
   updated_at: string;
 };
 
