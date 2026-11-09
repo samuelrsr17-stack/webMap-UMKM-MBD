@@ -76,6 +76,8 @@ export default function MbdMap({ villages, points, umkm, villageByCode, canEdit,
           <FitMbdBounds villages={villages} />
         </>
       )}
+
+      {/* RENDER POIN / MARKER */}
       {points.map((point) => {
         const village = villageByCode.get(point.village_code);
         return (
@@ -83,9 +85,11 @@ export default function MbdMap({ villages, points, umkm, villageByCode, canEdit,
             key={point.id}
             position={[point.lat, point.lng]}
             icon={pointIcon(point.category)}
+            // KUNCI KEAMANAN: Pengunjung tidak bisa menggeser marker (draggable bernilai false jika canEdit = false)
             draggable={canEdit}
             eventHandlers={{
               dragend: (event) => {
+                if (!canEdit) return; // Mencegah pengunjung memindahkan data
                 const marker = event.target as L.Marker;
                 const { lat, lng } = marker.getLatLng();
                 void onMovePoint(point.id, lat, lng).then((saved) => {
@@ -95,14 +99,21 @@ export default function MbdMap({ villages, points, umkm, villageByCode, canEdit,
             }}
           >
             <Tooltip direction="top">{point.name}</Tooltip>
+            
+            {/* POPUP YANG BERSIH: Hanya menampilkan informasi dan aman dari tombol hapus/edit */}
             <Popup>
-              <strong>{point.name}</strong>
-              <br />{village?.name ?? point.village_code} · {categoryLabels[point.category]}
-              {point.value != null && <><br />Nilai: {new Intl.NumberFormat("id-ID").format(point.value)}</>}
+              <div style={{ fontFamily: 'sans-serif' }}>
+                <strong>{point.name}</strong>
+                <br />{village?.name ?? point.village_code} · {categoryLabels[point.category]}
+                {point.value != null && <><br />Nilai: {new Intl.NumberFormat("id-ID").format(point.value)}</>}
+                {/* Tidak ada tombol Hapus atau Edit di sini untuk pengunjung */}
+              </div>
             </Popup>
           </Marker>
         );
       })}
+
+      {/* RENDER UMKM */}
       {[...latestUmkmByVillage.values()].flatMap((record) => {
         const village = villageByCode.get(record.village_code);
         if (!village) return [];
@@ -116,11 +127,16 @@ export default function MbdMap({ villages, points, umkm, villageByCode, canEdit,
               zIndexOffset={offset}
             >
               <Tooltip direction="top">{village.name} · UMKM {label}</Tooltip>
+              
+              {/* POPUP UMKM: Hanya info murni */}
               <Popup>
-                <strong>UMKM {label} · {new Intl.NumberFormat("id-ID").format(record[field])} usaha</strong>
-                <br />{village.name} · {village.kecamatan}
-                <br />Tahun data: {record.year}
-                {record.description && <><br /><span className="umkm-map-description">{record.description}</span></>}
+                <div style={{ fontFamily: 'sans-serif' }}>
+                  <strong>UMKM {label} · {new Intl.NumberFormat("id-ID").format(record[field])} usaha</strong>
+                  <br />{village.name} · {village.kecamatan}
+                  <br />Tahun data: {record.year}
+                  {record.description && <><br /><span className="umkm-map-description">{record.description}</span></>}
+                  {/* Tidak ada tombol Hapus atau Edit di sini untuk pengunjung */}
+                </div>
               </Popup>
             </Marker>
           ));
