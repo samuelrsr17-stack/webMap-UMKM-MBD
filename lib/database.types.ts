@@ -79,6 +79,10 @@ export type Database = {
     };
     Views: Record<string, never>;
     Functions: {
+      is_app_admin: {
+        Args: Record<string, never>;
+        Returns: boolean;
+      };
       upsert_mbd_villages: {
         Args: { features: Json };
         Returns: number;

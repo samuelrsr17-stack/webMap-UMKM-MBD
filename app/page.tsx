@@ -73,6 +73,8 @@ export default function HomePage() {
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
   const [session, setSession] = useState<Session | null>(null);
   const [authChecked, setAuthChecked] = useState(!supabase);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [adminChecked, setAdminChecked] = useState(false);
   const [villages, setVillages] = useState<VillageCollection | null>(null);
   const [points, setPoints] = useState<MapPoint[]>([]);
   const [umkm, setUmkm] = useState<UmkmRecord[]>([]);
@@ -135,11 +137,9 @@ export default function HomePage() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, nextSession) => {
       setSession(nextSession);
       setAuthChecked(true);
-      if (!nextSession) {
-        setPoints([]);
-        setUmkm([]);
-        setEconomy([]);
-      }
+      setIsAdmin(false);
+      setAdminChecked(!nextSession);
+      if (!nextSession) setEditor(null);
       if (event === "PASSWORD_RECOVERY") {
         setAuthMode("new-password");
         setAuthMessage("");
@@ -154,8 +154,41 @@ export default function HomePage() {
     };
   }, [notify, supabase]);
 
+  useEffect(() => {
+    let active = true;
+    const checkAdmin = async () => {
+      if (!supabase || !session) {
+        setIsAdmin(false);
+        setAdminChecked(true);
+        return;
+      }
+
+      setAdminChecked(false);
+      try {
+        const { data, error } = await supabase.rpc("is_app_admin");
+        if (!active) return;
+        if (error) {
+          setIsAdmin(false);
+          notify(`Hak admin gagal diperiksa: ${error.message}`, "error");
+        } else {
+          setIsAdmin(data);
+        }
+        setAdminChecked(true);
+      } catch (error: unknown) {
+        if (!active) return;
+        const message = error instanceof Error ? error.message : "Kesalahan tidak diketahui.";
+        setIsAdmin(false);
+        setAdminChecked(true);
+        notify(`Hak admin gagal diperiksa: ${message}`, "error");
+      }
+    };
+    void Promise.resolve().then(checkAdmin);
+
+    return () => { active = false; };
+  }, [notify, session, supabase]);
+
   const loadData = useCallback(async () => {
-    if (!supabase || !session) return;
+    if (!supabase) return;
     setLoadingData(true);
     const [pointResult, umkmResult, economyResult] = await Promise.all([
       supabase.from("map_points").select("*").order("updated_at", { ascending: false }),
@@ -171,7 +204,7 @@ export default function HomePage() {
     setPoints(pointResult.data ?? []);
     setUmkm(umkmResult.data ?? []);
     setEconomy(economyResult.data ?? []);
-  }, [notify, session, supabase]);
+  }, [notify, supabase]);
 
   useEffect(() => {
     let active = true;
@@ -218,7 +251,7 @@ export default function HomePage() {
   }, [economy, query, selectedDistrict, villageByCode]);
 
   const handleSavePoint = async (input: PointInput, id: string | null) => {
-    if (!supabase || !session) return notify("Masuk untuk menyimpan perubahan.", "error");
+    if (!supabase || !session || !isAdmin) return notify("Hanya admin yang dapat mengubah data bersama.", "error");
     const village = villageByCode.get(input.village_code);
     if (!village) return notify("Pilih desa yang tersedia dari daftar.", "error");
     if (!isInsideMbd(input.lat, input.lng, villages, input.village_code)) {
@@ -245,8 +278,8 @@ export default function HomePage() {
   };
 
   const handleMovePoint = async (id: string, lat: number, lng: number): Promise<boolean> => {
-    if (!supabase || !session) {
-      notify("Masuk untuk memindahkan titik.", "error");
+    if (!supabase || !session || !isAdmin) {
+      notify("Hanya admin yang dapat memindahkan titik bersama.", "error");
       return false;
     }
     const point = points.find((item) => item.id === id);
@@ -285,7 +318,7 @@ export default function HomePage() {
   };
 
   const handleSaveUmkm = async (input: UmkmInput, id: string | null) => {
-    if (!supabase || !session) return notify("Masuk untuk menyimpan perubahan.", "error");
+    if (!supabase || !session || !isAdmin) return notify("Hanya admin yang dapat mengubah data bersama.", "error");
     if (!villageByCode.has(input.village_code)) return notify("Pilih desa yang tersedia dari daftar.", "error");
     setBusy(true);
     const payload = { ...input };
@@ -294,18 +327,13 @@ export default function HomePage() {
       : await supabase.from("umkm_records").upsert(payload, { onConflict: "user_id,village_code,year" }).select().single();
     setBusy(false);
     if (result.error) return notify(`Data UMKM gagal disimpan: ${result.error.message}`, "error");
-    setUmkm((current) => {
-      const without = id
-        ? current.filter((item) => item.id !== id)
-        : current.filter((item) => !(item.village_code === result.data.village_code && item.year === result.data.year));
-      return [result.data, ...without];
-    });
+    setUmkm((current) => mergeRecordsById(current, [result.data]));
     setEditor(null);
     notify("Data UMKM tersimpan.");
   };
 
   const handleSaveEconomy = async (input: EconomyInput, id: string | null) => {
-    if (!supabase || !session) return notify("Masuk untuk menyimpan perubahan.", "error");
+    if (!supabase || !session || !isAdmin) return notify("Hanya admin yang dapat mengubah data bersama.", "error");
     if (!villageByCode.has(input.village_code)) return notify("Pilih desa yang tersedia dari daftar.", "error");
     setBusy(true);
     const result = id
@@ -313,18 +341,13 @@ export default function HomePage() {
       : await supabase.from("economy_records").upsert(input, { onConflict: "user_id,village_code,year" }).select().single();
     setBusy(false);
     if (result.error) return notify(`Data ekonomi gagal disimpan: ${result.error.message}`, "error");
-    setEconomy((current) => {
-      const without = id
-        ? current.filter((item) => item.id !== id)
-        : current.filter((item) => !(item.village_code === result.data.village_code && item.year === result.data.year));
-      return [result.data, ...without];
-    });
+    setEconomy((current) => mergeRecordsById(current, [result.data]));
     setEditor(null);
     notify("Data ekonomi tersimpan.");
   };
 
   const handleDelete = async (kind: "point" | "umkm" | "economy", id: string) => {
-    if (!supabase || !session) return notify("Masuk untuk menghapus data.", "error");
+    if (!supabase || !session || !isAdmin) return notify("Hanya admin yang dapat menghapus data bersama.", "error");
     if (!window.confirm("Hapus data ini secara permanen?")) return;
     const error = kind === "point"
       ? (await supabase.from("map_points").delete().eq("id", id)).error
@@ -339,8 +362,8 @@ export default function HomePage() {
   };
 
   const handleClearBusinessData = async () => {
-    if (!supabase || !session) return notify("Masuk untuk menghapus data.", "error");
-    if (!window.confirm("Hapus permanen SEMUA data UMKM dan Ekonomi desa dari akun ini, semua tahun? Data titik lapangan tidak akan dihapus.")) return;
+    if (!supabase || !session || !isAdmin) return notify("Hanya admin yang dapat menghapus data bersama.", "error");
+    if (!window.confirm("Hapus permanen SEMUA data UMKM dan Ekonomi desa dari SEMUA pengguna, semua tahun? Data titik lapangan tetap tersimpan.")) return;
 
     setBusy(true);
     const results = await Promise.allSettled([
@@ -373,7 +396,7 @@ export default function HomePage() {
     if (!file) return;
     input.value = "";
 
-    if (!supabase || !session) return notify("Masuk untuk mengimpor data.", "error");
+    if (!supabase || !session || !isAdmin) return notify("Hanya admin yang dapat mengimpor data bersama.", "error");
     if (file.size > 5 * 1024 * 1024) return notify("Ukuran file maksimal 5 MB.", "error");
 
     setBusy(true);
@@ -458,7 +481,7 @@ export default function HomePage() {
         const { data, error } = await supabase.from("umkm_records")
           .upsert(payloads, { onConflict: "user_id,village_code,year" }).select();
         if (error) throw new Error(`Data UMKM gagal diimpor: ${error.message}`);
-        setUmkm((current) => mergeVillageYearRecords(current, data));
+        setUmkm((current) => mergeRecordsById(current, data));
       } else {
         const year = new Date().getFullYear();
         const payloads: EconomyInput[] = [];
@@ -480,7 +503,7 @@ export default function HomePage() {
         const { data, error } = await supabase.from("economy_records")
           .upsert(payloads, { onConflict: "user_id,village_code,year" }).select();
         if (error) throw new Error(`Data ekonomi gagal diimpor: ${error.message}`);
-        setEconomy((current) => mergeVillageYearRecords(current, data));
+        setEconomy((current) => mergeRecordsById(current, data));
       }
 
       notify(`${rows.length - 1} baris berhasil diimpor.`);
@@ -604,7 +627,6 @@ export default function HomePage() {
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
-  const totalTurnover = visibleEconomy.reduce((sum, row) => sum + row.turnover, 0);
   return (
     <main className="app">
       <header className="topbar">
@@ -659,10 +681,10 @@ export default function HomePage() {
 
           <div className="sidebar-info">
             <div className="sidebar-info-icon"><ShieldCheck size={18} /></div>
-            <div><strong>Data per pengguna</strong><p>Setiap akun hanya dapat melihat dan mengelola datanya sendiri.</p></div>
+            <div><strong>{isAdmin ? "Akses administrator" : "Data bersama"}</strong><p>{isAdmin ? "Anda dapat mengelola data bersama." : "Semua pengunjung dapat melihat; hanya admin yang dapat mengubah."}</p></div>
           </div>
           <div className="sidebar-foot">
-            <span className="connection-indicator"><span className={supabase && session ? "is-connected" : ""} /> {supabase && session ? "Database terhubung" : "Belum terhubung"}</span>
+            <span className="connection-indicator"><span className={supabase ? "is-connected" : ""} /> {supabase ? "Database terhubung" : "Belum terhubung"}</span>
             <span className="help-indicator" title="Lihat README.md untuk panduan setup" aria-label="Lihat README untuk panduan setup"><CircleHelp size={15} /></span>
           </div>
         </aside>
@@ -675,18 +697,18 @@ export default function HomePage() {
               <p>Jelajahi dan kelola informasi lapangan per desa.</p>
             </div>
             <div className="heading-actions">
-              <span className="sync-status"><Cloud size={15} /> {session ? "Tersinkron" : "Lokal / belum masuk"}</span>
+              <span className="sync-status"><Cloud size={15} /> {isAdmin ? "Admin · tersinkron" : "Data bersama · hanya lihat"}</span>
               {activeTab !== "map" && (
                 <>
                   <button className="button button--quiet" onClick={downloadCsv}><ArrowDownToLine size={16} /> Ekspor CSV</button>
-                  <button className="button button--quiet" onClick={() => importInput.current?.click()} disabled={!session || busy}><Upload size={16} /> {busy ? "Mengimpor…" : "Impor CSV"}</button>
+                  {isAdmin && <button className="button button--quiet" onClick={() => importInput.current?.click()} disabled={busy}><Upload size={16} /> {busy ? "Mengimpor…" : "Impor CSV"}</button>}
                   <input ref={importInput} type="file" accept=".csv,text/csv" onChange={(event) => void handleImportCsv(event)} hidden />
                 </>
               )}
-              {(activeTab === "umkm" || activeTab === "economy") && <button className="button button--quiet" onClick={() => void handleClearBusinessData()} disabled={!session || busy}><Trash2 size={16} /> Hapus UMKM &amp; ekonomi</button>}
-              <button className="button button--primary" onClick={() => setEditor({ kind: activeTab === "umkm" ? "umkm" : activeTab === "economy" ? "economy" : "point", row: null })} disabled={!session}>
+              {isAdmin && (activeTab === "umkm" || activeTab === "economy") && <button className="button button--quiet" onClick={() => void handleClearBusinessData()} disabled={busy}><Trash2 size={16} /> Hapus UMKM &amp; ekonomi</button>}
+              {isAdmin && <button className="button button--primary" onClick={() => setEditor({ kind: activeTab === "umkm" ? "umkm" : activeTab === "economy" ? "economy" : "point", row: null })} disabled={busy}>
                 <Plus size={17} /> Tambah data
-              </button>
+              </button>}
             </div>
           </div>
 
@@ -696,18 +718,18 @@ export default function HomePage() {
               <div><strong>Hubungkan Supabase untuk mulai menyimpan.</strong><p>Salin <code>.env.example</code> menjadi <code>.env.local</code>, isi URL dan anon key Supabase, lalu jalankan migrasi database.</p></div>
             </div>
           )}
-          {supabase && !session && authChecked && (
+          {supabase && authChecked && (!session || (adminChecked && !isAdmin)) && (
             <div className="setup-notice setup-notice--muted" role="status">
               <ShieldCheck size={19} />
-              <div><strong>Masuk untuk mengakses data pribadi.</strong><p>Gunakan email dan kata sandi akun. Data Anda tidak dibagikan dengan akun lain.</p></div>
-              <button className="button button--small button--primary" onClick={() => { setAuthMode("sign-in"); setShowAuth(true); setAuthMessage(""); }}>Masuk</button>
+              <div><strong>Data bersama dapat dilihat tanpa masuk.</strong><p>{session ? "Akun ini hanya memiliki akses lihat. Perubahan data hanya dapat dilakukan oleh admin." : "Masuk hanya diperlukan untuk akun admin yang mengelola data."}</p></div>
+              {!session && <button className="button button--small button--primary" onClick={() => { setAuthMode("sign-in"); setShowAuth(true); setAuthMessage(""); }}>Masuk</button>}
             </div>
           )}
 
           <div className="summary-row">
             <article className="summary-card"><span className="summary-icon summary-icon--blue"><MapPin size={17} /></span><div><span className="summary-label">Titik lapangan</span><strong>{numberFormat.format(points.length)}</strong></div><small>tersimpan</small></article>
             <article className="summary-card"><span className="summary-icon summary-icon--green"><Store size={17} /></span><div><span className="summary-label">Catatan UMKM</span><strong>{numberFormat.format(visibleUmkm.length)}</strong></div><small>data desa</small></article>
-            <article className="summary-card"><span className="summary-icon summary-icon--amber"><Activity size={17} /></span><div><span className="summary-label">Akumulasi omzet</span><strong className="summary-currency">{currency.format(totalTurnover)}</strong></div><small>seluruh data</small></article>
+            <article className="summary-card"><span className="summary-icon summary-icon--amber"><Activity size={17} /></span><div><span className="summary-label">Catatan ekonomi</span><strong>{numberFormat.format(visibleEconomy.length)}</strong></div><small>semua sumber</small></article>
             <article className="summary-card"><span className="summary-icon summary-icon--purple"><Users size={17} /></span><div><span className="summary-label">Cakupan wilayah</span><strong>118 <small>desa</small></strong></div><small>17 kecamatan</small></article>
           </div>
 
@@ -718,40 +740,40 @@ export default function HomePage() {
                 <div className="map-legend"><span><i className="legend-district" /> Kecamatan</span><span><i className="legend-village" /> Desa</span><span><i className="legend-point legend-point--mikro" /> Mikro</span><span><i className="legend-point legend-point--kecil" /> Kecil</span><span><i className="legend-point legend-point--menengah" /> Menengah</span></div>
               </div>
               <div className="map-frame">
-                <MapCanvas villages={villages} points={visiblePoints} umkm={umkm} villageByCode={villageByCode} canEdit={Boolean(session) && !busy} onMovePoint={handleMovePoint} />
+                <MapCanvas villages={villages} points={visiblePoints} umkm={umkm} villageByCode={villageByCode} canEdit={isAdmin && !busy} onMovePoint={handleMovePoint} />
               </div>
               <div className="map-foot"><span><Layers3 size={15} /> Batas administrasi 17 kecamatan / 118 desa</span><span>{visiblePoints.length} titik lapangan · pin UMKM mengikuti data terbaru per desa</span></div>
             </div>
           )}
 
           {activeTab === "points" && (
-            <DataCard title="Titik lapangan" description="Lokasi fasilitas, UMKM, dan aktivitas ekonomi." count={visiblePoints.length} loading={loadingData} emptyText="Belum ada titik. Tambahkan titik pertama untuk memulai." canEdit={Boolean(session)} onAdd={() => setEditor({ kind: "point", row: null })}>
-              <div className="data-table-wrap"><table><thead><tr><th>Nama titik</th><th>Desa / kecamatan</th><th>Kategori</th><th>Koordinat</th><th>Nilai</th><th>Aksi</th></tr></thead><tbody>
+            <DataCard title="Titik lapangan" description="Lokasi fasilitas, UMKM, dan aktivitas ekonomi." count={visiblePoints.length} loading={loadingData} emptyText="Belum ada titik. Tambahkan titik pertama untuk memulai." canEdit={isAdmin} onAdd={() => setEditor({ kind: "point", row: null })}>
+              <div className="data-table-wrap"><table><thead><tr><th>Nama titik</th><th>Desa / kecamatan</th><th>Kategori</th><th>Koordinat</th><th>Nilai</th>{isAdmin && <th>Aksi</th>}</tr></thead><tbody>
                 {visiblePoints.map((point) => {
                   const village = villageByCode.get(point.village_code);
-                  return <tr key={point.id}><td><strong>{point.name}</strong>{point.description && <small className="row-note">{point.description}</small>}</td><td>{village?.name ?? point.village_code}<small className="row-note">{village?.kecamatan}</small></td><td><span className={`category-pill category-pill--${point.category}`}>{categoryLabels[point.category]}</span></td><td className="coordinates">{point.lat.toFixed(5)}, {point.lng.toFixed(5)}</td><td>{point.value == null ? "—" : numberFormat.format(point.value)}</td><td><RowActions onEdit={() => setEditor({ kind: "point", row: point })} onDelete={() => void handleDelete("point", point.id)} /></td></tr>;
+                  return <tr key={point.id}><td><strong>{point.name}</strong>{point.description && <small className="row-note">{point.description}</small>}</td><td>{village?.name ?? point.village_code}<small className="row-note">{village?.kecamatan}</small></td><td><span className={`category-pill category-pill--${point.category}`}>{categoryLabels[point.category]}</span></td><td className="coordinates">{point.lat.toFixed(5)}, {point.lng.toFixed(5)}</td><td>{point.value == null ? "—" : numberFormat.format(point.value)}</td>{isAdmin && <td><RowActions onEdit={() => setEditor({ kind: "point", row: point })} onDelete={() => void handleDelete("point", point.id)} /></td>}</tr>;
                 })}
               </tbody></table></div>
             </DataCard>
           )}
 
           {activeTab === "umkm" && (
-            <DataCard title="Data UMKM" description="Jumlah usaha mikro, kecil, dan menengah per desa." count={visibleUmkm.length} loading={loadingData} emptyText="Belum ada data UMKM. Tambahkan rekap desa untuk memulai." canEdit={Boolean(session)} onAdd={() => setEditor({ kind: "umkm", row: null })}>
-              <div className="data-table-wrap"><table><thead><tr><th>Desa / kecamatan</th><th>Mikro</th><th>Kecil</th><th>Menengah</th><th>Total</th><th>Sumber</th><th>Aksi</th></tr></thead><tbody>
+            <DataCard title="Data UMKM" description="Jumlah usaha mikro, kecil, dan menengah per desa." count={visibleUmkm.length} loading={loadingData} emptyText="Belum ada data UMKM. Tambahkan rekap desa untuk memulai." canEdit={isAdmin} onAdd={() => setEditor({ kind: "umkm", row: null })}>
+              <div className="data-table-wrap"><table><thead><tr><th>Desa / kecamatan</th><th>Mikro</th><th>Kecil</th><th>Menengah</th><th>Total</th><th>Sumber</th>{isAdmin && <th>Aksi</th>}</tr></thead><tbody>
                 {visibleUmkm.map((row) => {
                   const village = villageByCode.get(row.village_code);
-                  return <tr key={row.id}><td><strong>{village?.name ?? row.village_code}</strong><small className="row-note">{village?.kecamatan}</small></td><td>{numberFormat.format(row.micro)}</td><td>{numberFormat.format(row.small)}</td><td>{numberFormat.format(row.medium)}</td><td><strong>{numberFormat.format(row.micro + row.small + row.medium)}</strong></td><td>{row.source || "—"}</td><td><RowActions onEdit={() => setEditor({ kind: "umkm", row })} onDelete={() => void handleDelete("umkm", row.id)} /></td></tr>;
+                  return <tr key={row.id}><td><strong>{village?.name ?? row.village_code}</strong><small className="row-note">{village?.kecamatan}</small></td><td>{numberFormat.format(row.micro)}</td><td>{numberFormat.format(row.small)}</td><td>{numberFormat.format(row.medium)}</td><td><strong>{numberFormat.format(row.micro + row.small + row.medium)}</strong></td><td>{row.source || "—"}</td>{isAdmin && <td><RowActions onEdit={() => setEditor({ kind: "umkm", row })} onDelete={() => void handleDelete("umkm", row.id)} /></td>}</tr>;
                 })}
               </tbody></table></div>
             </DataCard>
           )}
 
           {activeTab === "economy" && (
-            <DataCard title="Ekonomi desa" description="Omzet, tenaga kerja, dan investasi tercatat per desa." count={visibleEconomy.length} loading={loadingData} emptyText="Belum ada data ekonomi. Tambahkan catatan per desa." canEdit={Boolean(session)} onAdd={() => setEditor({ kind: "economy", row: null })}>
-              <div className="data-table-wrap"><table><thead><tr><th>Desa / kecamatan</th><th>Omzet</th><th>Tenaga kerja</th><th>Investasi</th><th>Diperbarui</th><th>Aksi</th></tr></thead><tbody>
+            <DataCard title="Ekonomi desa" description="Omzet, tenaga kerja, dan investasi tercatat per desa." count={visibleEconomy.length} loading={loadingData} emptyText="Belum ada data ekonomi. Tambahkan catatan per desa." canEdit={isAdmin} onAdd={() => setEditor({ kind: "economy", row: null })}>
+              <div className="data-table-wrap"><table><thead><tr><th>Desa / kecamatan</th><th>Omzet</th><th>Tenaga kerja</th><th>Investasi</th><th>Diperbarui</th>{isAdmin && <th>Aksi</th>}</tr></thead><tbody>
                 {visibleEconomy.map((row) => {
                   const village = villageByCode.get(row.village_code);
-                  return <tr key={row.id}><td><strong>{village?.name ?? row.village_code}</strong><small className="row-note">{village?.kecamatan}</small></td><td>{currency.format(row.turnover)}</td><td>{numberFormat.format(row.workers)}</td><td>{currency.format(row.investment)}</td><td>{new Date(row.updated_at).toLocaleDateString("id-ID")}</td><td><RowActions onEdit={() => setEditor({ kind: "economy", row })} onDelete={() => void handleDelete("economy", row.id)} /></td></tr>;
+                  return <tr key={row.id}><td><strong>{village?.name ?? row.village_code}</strong><small className="row-note">{village?.kecamatan}</small></td><td>{currency.format(row.turnover)}</td><td>{numberFormat.format(row.workers)}</td><td>{currency.format(row.investment)}</td><td>{new Date(row.updated_at).toLocaleDateString("id-ID")}</td>{isAdmin && <td><RowActions onEdit={() => setEditor({ kind: "economy", row })} onDelete={() => void handleDelete("economy", row.id)} /></td>}</tr>;
                 })}
               </tbody></table></div>
             </DataCard>
@@ -820,11 +842,11 @@ export default function HomePage() {
   );
 }
 
-function mergeVillageYearRecords<T extends { village_code: string; year: number }>(current: T[], updates: T[]): T[] {
-  const updatedKeys = new Set(updates.map((record) => `${record.village_code}:${record.year}`));
+function mergeRecordsById<T extends { id: string }>(current: T[], updates: T[]): T[] {
+  const updatedIds = new Set(updates.map((record) => record.id));
   return [
     ...updates,
-    ...current.filter((record) => !updatedKeys.has(`${record.village_code}:${record.year}`)),
+    ...current.filter((record) => !updatedIds.has(record.id)),
   ];
 }
 
@@ -838,7 +860,7 @@ function DataCard({
   return (
     <section className="records-card">
       <header className="records-head"><div><div className="section-title">{title}</div><p>{description}</p></div><span className="records-count">{count} catatan</span></header>
-      {loading ? <div className="table-state">Memuat data tersinkron…</div> : isEmpty ? <div className="empty-state"><span className="empty-icon"><Database size={22} /></span><strong>{emptyText}</strong><button className="button button--primary button--small" onClick={onAdd} disabled={!canEdit}><Plus size={15} /> Tambah data</button></div> : children}
+      {loading ? <div className="table-state">Memuat data tersinkron…</div> : isEmpty ? <div className="empty-state"><span className="empty-icon"><Database size={22} /></span><strong>{emptyText}</strong>{canEdit && <button className="button button--primary button--small" onClick={onAdd}><Plus size={15} /> Tambah data</button>}</div> : children}
     </section>
   );
 }
