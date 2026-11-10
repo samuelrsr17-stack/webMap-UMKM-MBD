@@ -17,9 +17,9 @@ interface MapCanvasProps {
 }
 
 const umkmCategories = [
-  { field: "micro", category: "mikro", label: "Mikro", offset: -16 },
-  { field: "small", category: "kecil", label: "Kecil", offset: 0 },
-  { field: "medium", category: "menengah", label: "Menengah", offset: 16 },
+  { field: "micro", descriptionField: "description_micro", category: "mikro", label: "Mikro", offset: -16 },
+  { field: "small", descriptionField: "description_small", category: "kecil", label: "Kecil", offset: 0 },
+  { field: "medium", descriptionField: "description_medium", category: "menengah", label: "Menengah", offset: 16 },
 ] as const;
 
 function FitMbdBounds({ villages }: { villages: VillageCollection | null }) {
@@ -119,7 +119,7 @@ export default function MbdMap({ villages, points, umkm, villageByCode, canEdit,
         if (!village) return [];
         return umkmCategories
           .filter(({ field }) => record[field] > 0)
-          .map(({ field, category, label, offset }) => (
+          .map(({ field, descriptionField, category, label, offset }) => (
             <Marker
               key={`umkm-${record.village_code}-${category}`}
               position={village.label}
@@ -134,7 +134,7 @@ export default function MbdMap({ villages, points, umkm, villageByCode, canEdit,
                   <strong>UMKM {label} · {new Intl.NumberFormat("id-ID").format(record[field])} usaha</strong>
                   <br />{village.name} · {village.kecamatan}
                   <br />Tahun data: {record.year}
-                  {record.description && <><br /><span className="umkm-map-description">{record.description}</span></>}
+                  {record[descriptionField] && <><br /><span className="umkm-map-description">{record[descriptionField]}</span></>}
                   {/* Tidak ada tombol Hapus atau Edit di sini untuk pengunjung */}
                 </div>
               </Popup>
