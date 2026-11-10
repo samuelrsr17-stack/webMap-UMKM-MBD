@@ -75,7 +75,6 @@ export default function HomePage() {
   const [authChecked, setAuthChecked] = useState(!supabase);
   const [isAdmin, setIsAdmin] = useState(false);
   const [adminChecked, setAdminChecked] = useState(false);
-  const [realtimeConnected, setRealtimeConnected] = useState(false);
   const [villages, setVillages] = useState<VillageCollection | null>(null);
   const [points, setPoints] = useState<MapPoint[]>([]);
   const [umkm, setUmkm] = useState<UmkmRecord[]>([]);
@@ -208,34 +207,12 @@ export default function HomePage() {
   }, [notify, supabase]);
 
   useEffect(() => {
-    if (!supabase) return;
-
-    let refreshTimer: number | null = null;
-    const refreshData = () => {
-      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
-      refreshTimer = window.setTimeout(() => {
-        refreshTimer = null;
-        void Promise.resolve().then(loadData);
-      }, 200);
-    };
-    const channel = supabase
-      .channel("shared-data-updates")
-      .on("postgres_changes", { event: "*", schema: "public", table: "map_points" }, refreshData)
-      .on("postgres_changes", { event: "*", schema: "public", table: "umkm_records" }, refreshData)
-      .on("postgres_changes", { event: "*", schema: "public", table: "economy_records" }, refreshData)
-      .subscribe((status) => {
-        setRealtimeConnected(status === "SUBSCRIBED");
-        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
-          notify("Koneksi pembaruan real-time gagal. Muat ulang halaman untuk mencoba kembali.", "error");
-        }
-      });
-
-    void Promise.resolve().then(loadData);
-    return () => {
-      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
-      void supabase.removeChannel(channel);
-    };
-  }, [loadData, notify, supabase]);
+    let active = true;
+    void Promise.resolve().then(() => {
+      if (active) return loadData();
+    });
+    return () => { active = false; };
+  }, [loadData]);
 
   const districtOptions = useMemo(
     () => [...new Set(villages?.features.map((feature) => feature.properties.kecamatan) ?? [])]
@@ -272,24 +249,6 @@ export default function HomePage() {
         && (!selectedDistrict || village?.kecamatan === selectedDistrict);
     });
   }, [economy, query, selectedDistrict, villageByCode]);
-  const latestUmkm = useMemo(() => latestRecordsByVillage(visibleUmkm), [visibleUmkm]);
-  const latestEconomy = useMemo(() => latestRecordsByVillage(visibleEconomy), [visibleEconomy]);
-  const umkmTotals = useMemo(() => latestUmkm.reduce(
-    (totals, row) => ({
-      micro: totals.micro + row.micro,
-      small: totals.small + row.small,
-      medium: totals.medium + row.medium,
-    }),
-    { micro: 0, small: 0, medium: 0 },
-  ), [latestUmkm]);
-  const economyTotals = useMemo(() => latestEconomy.reduce(
-    (totals, row) => ({
-      turnover: totals.turnover + row.turnover,
-      investment: totals.investment + row.investment,
-      workers: totals.workers + row.workers,
-    }),
-    { turnover: 0, investment: 0, workers: 0 },
-  ), [latestEconomy]);
 
   const handleSavePoint = async (input: PointInput, id: string | null) => {
     if (!supabase || !session || !isAdmin) return notify("Hanya admin yang dapat mengubah data bersama.", "error");
@@ -738,7 +697,7 @@ export default function HomePage() {
               <p>Jelajahi dan kelola informasi lapangan per desa.</p>
             </div>
             <div className="heading-actions">
-              <span className="sync-status"><Cloud size={15} /> {isAdmin ? "Admin" : "Data bersama"} · {supabase && realtimeConnected ? "real-time" : "belum live"}</span>
+              <span className="sync-status"><Cloud size={15} /> {isAdmin ? "Admin · tersinkron" : "Data bersama · hanya lihat"}</span>
               {activeTab !== "map" && (
                 <>
                   <button className="button button--quiet" onClick={downloadCsv}><ArrowDownToLine size={16} /> Ekspor CSV</button>
@@ -768,13 +727,10 @@ export default function HomePage() {
           )}
 
           <div className="summary-row">
-            <article className="summary-card"><span className="summary-icon summary-icon--blue"><MapPin size={17} /></span><div><span className="summary-label">Titik lapangan</span><strong>{numberFormat.format(visiblePoints.length)}</strong></div><small>tersimpan</small></article>
-            <article className="summary-card"><span className="summary-icon summary-icon--green"><Store size={17} /></span><div><span className="summary-label">Usaha mikro</span><strong>{numberFormat.format(umkmTotals.micro)}</strong></div><small>terbaru/desa</small></article>
-            <article className="summary-card"><span className="summary-icon summary-icon--amber"><Store size={17} /></span><div><span className="summary-label">Usaha kecil</span><strong>{numberFormat.format(umkmTotals.small)}</strong></div><small>terbaru/desa</small></article>
-            <article className="summary-card"><span className="summary-icon summary-icon--purple"><Store size={17} /></span><div><span className="summary-label">Usaha menengah</span><strong>{numberFormat.format(umkmTotals.medium)}</strong></div><small>terbaru/desa</small></article>
-            <article className="summary-card"><span className="summary-icon summary-icon--blue"><Activity size={17} /></span><div><span className="summary-label">Omzet</span><strong className="summary-currency">{currency.format(economyTotals.turnover)}</strong></div><small>terbaru/desa</small></article>
-            <article className="summary-card"><span className="summary-icon summary-icon--green"><BarChart3 size={17} /></span><div><span className="summary-label">Investasi</span><strong className="summary-currency">{currency.format(economyTotals.investment)}</strong></div><small>terbaru/desa</small></article>
-            <article className="summary-card"><span className="summary-icon summary-icon--amber"><Users size={17} /></span><div><span className="summary-label">Tenaga kerja</span><strong>{numberFormat.format(economyTotals.workers)}</strong></div><small>terbaru/desa</small></article>
+            <article className="summary-card"><span className="summary-icon summary-icon--blue"><MapPin size={17} /></span><div><span className="summary-label">Titik lapangan</span><strong>{numberFormat.format(points.length)}</strong></div><small>tersimpan</small></article>
+            <article className="summary-card"><span className="summary-icon summary-icon--green"><Store size={17} /></span><div><span className="summary-label">Catatan UMKM</span><strong>{numberFormat.format(visibleUmkm.length)}</strong></div><small>data desa</small></article>
+            <article className="summary-card"><span className="summary-icon summary-icon--amber"><Activity size={17} /></span><div><span className="summary-label">Catatan ekonomi</span><strong>{numberFormat.format(visibleEconomy.length)}</strong></div><small>semua sumber</small></article>
+            <article className="summary-card"><span className="summary-icon summary-icon--purple"><Users size={17} /></span><div><span className="summary-label">Cakupan wilayah</span><strong>118 <small>desa</small></strong></div><small>17 kecamatan</small></article>
           </div>
 
           {activeTab === "map" && (
@@ -892,15 +848,6 @@ function mergeRecordsById<T extends { id: string }>(current: T[], updates: T[]):
     ...updates,
     ...current.filter((record) => !updatedIds.has(record.id)),
   ];
-}
-
-function latestRecordsByVillage<T extends { village_code: string; year: number }>(records: T[]): T[] {
-  const latest = new Map<string, T>();
-  for (const record of records) {
-    const current = latest.get(record.village_code);
-    if (!current || record.year > current.year) latest.set(record.village_code, record);
-  }
-  return [...latest.values()];
 }
 
 function DataCard({
