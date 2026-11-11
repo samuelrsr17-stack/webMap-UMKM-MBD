@@ -4,7 +4,9 @@ import dynamic from "next/dynamic";
 import {
   Activity,
   ArrowDownToLine,
+  ArrowRight,
   BarChart3,
+  BriefcaseBusiness,
   Building2,
   Check,
   ChevronDown,
@@ -28,7 +30,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import type { Session } from "@supabase/supabase-js";
-import type { EconomyRecord, MapPoint, PointCategory, UmkmRecord } from "@/lib/database.types";
+import type { EconomyRecord, MapPoint, PointCategory, UmkmBusinessTypeRecord, UmkmRecord } from "@/lib/database.types";
 import { parseCsv } from "@/lib/csv";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import {
@@ -38,8 +40,11 @@ import {
   pointSchema,
   type EconomyInput,
   type PointInput,
+  type UmkmBusinessTypeInput,
   type UmkmInput,
   type VillageCollection,
+  businessTypeFields,
+  umkmBusinessTypeSchema,
   umkmSchema,
 } from "@/lib/validation";
 
@@ -48,18 +53,27 @@ const MapCanvas = dynamic(() => import("@/components/mbd-map"), {
   loading: () => <div className="map-loading">Memuat peta wilayah…</div>,
 });
 
-type Tab = "map" | "points" | "umkm" | "economy";
+type Tab = "dashboard" | "map" | "villages" | "points" | "umkm" | "business-types" | "economy";
+type WorkspaceTab = Exclude<Tab, "villages">;
 type AuthMode = "sign-in" | "reset-password" | "new-password";
 type Editor = { kind: "point"; row: MapPoint | null } |
   { kind: "umkm"; row: UmkmRecord | null } |
+  { kind: "business-types"; row: UmkmBusinessTypeRecord | null } |
   { kind: "economy"; row: EconomyRecord | null };
 type Village = VillageCollection["features"][number]["properties"];
 
-const tabs: { id: Tab; label: string; icon: typeof MapPin }[] = [
+const tabs: { id: WorkspaceTab; label: string; icon: typeof MapPin }[] = [
+  { id: "dashboard", label: "Ringkasan", icon: Activity },
   { id: "map", label: "Peta", icon: MapPin },
   { id: "points", label: "Titik lapangan", icon: Layers3 },
   { id: "umkm", label: "Data UMKM", icon: Store },
+  { id: "business-types", label: "Jenis usaha per desa", icon: BriefcaseBusiness },
   { id: "economy", label: "Ekonomi desa", icon: BarChart3 },
+];
+const visitorTabs: { id: Tab; label: string; icon: typeof MapPin }[] = [
+  { id: "dashboard", label: "Ringkasan", icon: Activity },
+  { id: "map", label: "Peta", icon: MapPin },
+  { id: "villages", label: "Desa", icon: Building2 },
 ];
 
 const currency = new Intl.NumberFormat("id-ID", {
@@ -68,6 +82,12 @@ const currency = new Intl.NumberFormat("id-ID", {
   maximumFractionDigits: 0,
 });
 const numberFormat = new Intl.NumberFormat("id-ID");
+const compactCurrency = new Intl.NumberFormat("id-ID", {
+  style: "currency",
+  currency: "IDR",
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
 
 export default function HomePage() {
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
@@ -76,10 +96,12 @@ export default function HomePage() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [adminChecked, setAdminChecked] = useState(false);
   const [villages, setVillages] = useState<VillageCollection | null>(null);
+  const [selectedVillageCode, setSelectedVillageCode] = useState<string | null>(null);
   const [points, setPoints] = useState<MapPoint[]>([]);
   const [umkm, setUmkm] = useState<UmkmRecord[]>([]);
+  const [businessTypes, setBusinessTypes] = useState<UmkmBusinessTypeRecord[]>([]);
   const [economy, setEconomy] = useState<EconomyRecord[]>([]);
-  const [activeTab, setActiveTab] = useState<Tab>("map");
+  const [activeTab, setActiveTab] = useState<Tab>("dashboard");
   const [editor, setEditor] = useState<Editor | null>(null);
   const [query, setQuery] = useState("");
   const [selectedDistrict, setSelectedDistrict] = useState("");
@@ -94,6 +116,14 @@ export default function HomePage() {
   const [loadingData, setLoadingData] = useState(false);
   const [toast, setToast] = useState<{ text: string; type: "success" | "error" } | null>(null);
   const importInput = useRef<HTMLInputElement>(null);
+  const dataLoadSequence = useRef(0);
+  const hasLoadedData = useRef(false);
+  const isVisitor = authChecked && !session;
+  const navigationTabs = isVisitor
+    ? visitorTabs
+    : isAdmin
+      ? tabs
+      : tabs.filter((tab) => tab.id !== "business-types");
 
   const notify = useCallback((text: string, type: "success" | "error" = "success") => {
     setToast({ text, type });
@@ -139,7 +169,13 @@ export default function HomePage() {
       setAuthChecked(true);
       setIsAdmin(false);
       setAdminChecked(!nextSession);
-      if (!nextSession) setEditor(null);
+        if (event === "SIGNED_IN" || event === "SIGNED_OUT") {
+          setActiveTab("dashboard");
+          setSelectedVillageCode(null);
+          setSelectedDistrict("");
+          setQuery("");
+        }
+        if (!nextSession) setEditor(null);
       if (event === "PASSWORD_RECOVERY") {
         setAuthMode("new-password");
         setAuthMessage("");
@@ -189,30 +225,74 @@ export default function HomePage() {
 
   const loadData = useCallback(async () => {
     if (!supabase) return;
-    setLoadingData(true);
-    const [pointResult, umkmResult, economyResult] = await Promise.all([
-      supabase.from("map_points").select("*").order("updated_at", { ascending: false }),
-      supabase.from("umkm_records").select("*").order("year", { ascending: false }),
-      supabase.from("economy_records").select("*").order("year", { ascending: false }),
-    ]);
-    setLoadingData(false);
-    const errors = [pointResult.error, umkmResult.error, economyResult.error].filter(Boolean);
-    if (errors.length) {
-      notify(`Data gagal dimuat: ${errors.map((error) => error?.message).join("; ")}`, "error");
-      return;
+    const sequence = ++dataLoadSequence.current;
+    if (!hasLoadedData.current) setLoadingData(true);
+    try {
+      const [pointResult, umkmResult, businessTypeResult, economyResult] = await Promise.all([
+        loadAllPages((from, to) => supabase.from("map_points").select("*")
+          .order("updated_at", { ascending: false }).order("id", { ascending: true }).range(from, to)),
+        loadAllPages((from, to) => supabase.from("umkm_records").select("*")
+          .order("year", { ascending: false }).order("id", { ascending: true }).range(from, to)),
+        loadAllPages((from, to) => supabase.from("umkm_business_type_records").select("*")
+          .order("year", { ascending: false }).order("id", { ascending: true }).range(from, to)),
+        loadAllPages((from, to) => supabase.from("economy_records").select("*")
+          .order("year", { ascending: false }).order("id", { ascending: true }).range(from, to)),
+      ]);
+      if (sequence !== dataLoadSequence.current) return;
+      const errors = [pointResult.error, umkmResult.error, businessTypeResult.error, economyResult.error]
+        .filter((error): error is { message: string } => error !== null);
+      if (errors.length) {
+        notify(`Data gagal dimuat: ${errors.map((error) => error.message).join("; ")}`, "error");
+        return;
+      }
+      setPoints(pointResult.data);
+      setUmkm(umkmResult.data);
+      setBusinessTypes(businessTypeResult.data);
+      setEconomy(economyResult.data);
+      hasLoadedData.current = true;
+    } catch (error: unknown) {
+      if (sequence !== dataLoadSequence.current) return;
+      const message = error instanceof Error ? error.message : "Kesalahan tidak diketahui.";
+      notify(`Data gagal dimuat: ${message}`, "error");
+    } finally {
+      if (sequence === dataLoadSequence.current) setLoadingData(false);
     }
-    setPoints(pointResult.data ?? []);
-    setUmkm(umkmResult.data ?? []);
-    setEconomy(economyResult.data ?? []);
   }, [notify, supabase]);
 
   useEffect(() => {
-    let active = true;
-    void Promise.resolve().then(() => {
-      if (active) return loadData();
-    });
-    return () => { active = false; };
-  }, [loadData]);
+    if (!supabase) return;
+
+    let refreshTimer: number | null = null;
+    let realtimeErrorReported = false;
+    const refreshData = () => {
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        void Promise.resolve().then(loadData);
+      }, 200);
+    };
+    const channel = supabase
+      .channel("shared-data-updates")
+      .on("postgres_changes", { event: "*", schema: "public", table: "map_points" }, refreshData)
+      .on("postgres_changes", { event: "*", schema: "public", table: "umkm_records" }, refreshData)
+      .on("postgres_changes", { event: "*", schema: "public", table: "umkm_business_type_records" }, refreshData)
+      .on("postgres_changes", { event: "*", schema: "public", table: "economy_records" }, refreshData)
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          realtimeErrorReported = false;
+        } else if ((status === "CHANNEL_ERROR" || status === "TIMED_OUT") && !realtimeErrorReported) {
+          realtimeErrorReported = true;
+          notify("Pembaruan real-time gagal tersambung. Pastikan migrasi Realtime sudah dijalankan di Supabase.", "error");
+        }
+      });
+
+    void Promise.resolve().then(loadData);
+    return () => {
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+      dataLoadSequence.current += 1;
+      void supabase.removeChannel(channel);
+    };
+  }, [loadData, notify, supabase]);
 
   const districtOptions = useMemo(
     () => [...new Set(villages?.features.map((feature) => feature.properties.kecamatan) ?? [])]
@@ -241,6 +321,14 @@ export default function HomePage() {
         && (!selectedDistrict || village?.kecamatan === selectedDistrict);
     });
   }, [query, selectedDistrict, umkm, villageByCode]);
+  const visibleBusinessTypes = useMemo(() => {
+    const term = query.trim().toLocaleLowerCase("id");
+    return businessTypes.filter((row) => {
+      const village = villageByCode.get(row.village_code);
+      return (!term || village?.name.toLocaleLowerCase("id").includes(term) || village?.kecamatan.toLocaleLowerCase("id").includes(term))
+        && (!selectedDistrict || village?.kecamatan === selectedDistrict);
+    });
+  }, [businessTypes, query, selectedDistrict, villageByCode]);
   const visibleEconomy = useMemo(() => {
     const term = query.trim().toLocaleLowerCase("id");
     return economy.filter((row) => {
@@ -249,6 +337,74 @@ export default function HomePage() {
         && (!selectedDistrict || village?.kecamatan === selectedDistrict);
     });
   }, [economy, query, selectedDistrict, villageByCode]);
+  const latestUmkm = useMemo(() => latestByVillage(visibleUmkm), [visibleUmkm]);
+  const latestEconomy = useMemo(() => latestByVillage(visibleEconomy), [visibleEconomy]);
+  const umkmTotals = useMemo(
+    () => latestUmkm.reduce((totals, row) => ({
+      micro: totals.micro + row.micro,
+      small: totals.small + row.small,
+      medium: totals.medium + row.medium,
+    }), { micro: 0, small: 0, medium: 0 }),
+    [latestUmkm],
+  );
+  const economyTotals = useMemo(
+    () => latestEconomy.reduce((totals, row) => ({
+      turnover: totals.turnover + row.turnover,
+      workers: totals.workers + row.workers,
+      investment: totals.investment + row.investment,
+    }), { turnover: 0, workers: 0, investment: 0 }),
+    [latestEconomy],
+  );
+  const reportingVillageCount = useMemo(() => new Set([
+    ...visiblePoints.map((point) => point.village_code),
+    ...latestUmkm.map((row) => row.village_code),
+    ...latestEconomy.map((row) => row.village_code),
+  ]).size, [latestEconomy, latestUmkm, visiblePoints]);
+  const latestUmkmForDisplay = useMemo(
+    () => [...latestUmkm]
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.year - a.year)
+      .slice(0, 5),
+    [latestUmkm],
+  );
+  const latestUmkmByVillage = useMemo(
+    () => new Map(latestByVillage(umkm).map((record) => [record.village_code, record])),
+    [umkm],
+  );
+  const latestEconomyByVillage = useMemo(
+    () => new Map(latestByVillage(economy).map((record) => [record.village_code, record])),
+    [economy],
+  );
+  const selectedVillage = selectedVillageCode ? villageByCode.get(selectedVillageCode) : undefined;
+  const selectedVillageUmkm = selectedVillageCode ? latestUmkmByVillage.get(selectedVillageCode) : undefined;
+  const selectedVillageEconomy = selectedVillageCode ? latestEconomyByVillage.get(selectedVillageCode) : undefined;
+  const latestBusinessTypesByVillage = useMemo(
+    () => new Map(latestByVillage(businessTypes).map((record) => [record.village_code, record])),
+    [businessTypes],
+  );
+  const selectedVillageBusinessTypes = selectedVillageCode
+    ? latestBusinessTypesByVillage.get(selectedVillageCode)
+    : undefined;
+  const visibleVillages = useMemo(() => {
+    const term = query.trim().toLocaleLowerCase("id");
+    return (villages?.features.map((feature) => feature.properties) ?? [])
+      .filter((village) => (!term || village.name.toLocaleLowerCase("id").includes(term)
+        || village.kecamatan.toLocaleLowerCase("id").includes(term))
+        && (!selectedDistrict || village.kecamatan === selectedDistrict))
+      .sort((a, b) => a.name.localeCompare(b.name, "id"));
+  }, [query, selectedDistrict, villages]);
+  const villageMapPoints = isVisitor && selectedVillageCode
+    ? points.filter((point) => point.village_code === selectedVillageCode)
+    : visiblePoints;
+  const villageMapUmkm = isVisitor && selectedVillageCode
+    ? umkm.filter((record) => record.village_code === selectedVillageCode)
+    : umkm;
+
+  const selectVillage = (village: Village) => {
+    setSelectedVillageCode(village.code);
+    setSelectedDistrict(village.kecamatan);
+    setQuery("");
+    setActiveTab("map");
+  };
 
   const handleSavePoint = async (input: PointInput, id: string | null) => {
     if (!supabase || !session || !isAdmin) return notify("Hanya admin yang dapat mengubah data bersama.", "error");
@@ -332,6 +488,21 @@ export default function HomePage() {
     notify("Data UMKM tersimpan.");
   };
 
+  const handleSaveBusinessTypes = async (input: UmkmBusinessTypeInput, id: string | null) => {
+    if (!supabase || !session || !isAdmin) return notify("Hanya admin yang dapat mengubah data bersama.", "error");
+    if (!villageByCode.has(input.village_code)) return notify("Pilih desa yang tersedia dari daftar.", "error");
+    setBusy(true);
+    const result = id
+      ? await supabase.from("umkm_business_type_records").update(input).eq("id", id).select().single()
+      : await supabase.from("umkm_business_type_records")
+        .upsert(input, { onConflict: "village_code,year" }).select().single();
+    setBusy(false);
+    if (result.error) return notify(`Jumlah jenis usaha gagal disimpan: ${result.error.message}`, "error");
+    setBusinessTypes((current) => mergeRecordsById(current, [result.data]));
+    setEditor(null);
+    notify("Jumlah jenis usaha tersimpan.");
+  };
+
   const handleSaveEconomy = async (input: EconomyInput, id: string | null) => {
     if (!supabase || !session || !isAdmin) return notify("Hanya admin yang dapat mengubah data bersama.", "error");
     if (!villageByCode.has(input.village_code)) return notify("Pilih desa yang tersedia dari daftar.", "error");
@@ -346,40 +517,45 @@ export default function HomePage() {
     notify("Data ekonomi tersimpan.");
   };
 
-  const handleDelete = async (kind: "point" | "umkm" | "economy", id: string) => {
+  const handleDelete = async (kind: "point" | "umkm" | "business-types" | "economy", id: string) => {
     if (!supabase || !session || !isAdmin) return notify("Hanya admin yang dapat menghapus data bersama.", "error");
     if (!window.confirm("Hapus data ini secara permanen?")) return;
     const error = kind === "point"
       ? (await supabase.from("map_points").delete().eq("id", id)).error
       : kind === "umkm"
         ? (await supabase.from("umkm_records").delete().eq("id", id)).error
-        : (await supabase.from("economy_records").delete().eq("id", id)).error;
+        : kind === "business-types"
+          ? (await supabase.from("umkm_business_type_records").delete().eq("id", id)).error
+          : (await supabase.from("economy_records").delete().eq("id", id)).error;
     if (error) return notify(`Data gagal dihapus: ${error.message}`, "error");
     if (kind === "point") setPoints((current) => current.filter((item) => item.id !== id));
     if (kind === "umkm") setUmkm((current) => current.filter((item) => item.id !== id));
+    if (kind === "business-types") setBusinessTypes((current) => current.filter((item) => item.id !== id));
     if (kind === "economy") setEconomy((current) => current.filter((item) => item.id !== id));
     notify("Data berhasil dihapus.");
   };
 
   const handleClearBusinessData = async () => {
     if (!supabase || !session || !isAdmin) return notify("Hanya admin yang dapat menghapus data bersama.", "error");
-    if (!window.confirm("Hapus permanen SEMUA data UMKM dan Ekonomi desa dari SEMUA pengguna, semua tahun? Data titik lapangan tetap tersimpan.")) return;
+    if (!window.confirm("Hapus permanen SEMUA data UMKM, jenis usaha per desa, dan Ekonomi desa dari SEMUA pengguna, semua tahun? Data titik lapangan tetap tersimpan.")) return;
 
     setBusy(true);
     const results = await Promise.allSettled([
       supabase.from("umkm_records").delete().gte("year", 2000).lte("year", 2100),
+      supabase.from("umkm_business_type_records").delete().gte("year", 2000).lte("year", 2100),
       supabase.from("economy_records").delete().gte("year", 2000).lte("year", 2100),
     ]);
     setBusy(false);
 
     const errors = results.map((result, index) => {
-      const dataset = index === 0 ? "UMKM" : "Ekonomi desa";
+      const dataset = ["UMKM", "Jenis usaha per desa", "Ekonomi desa"][index];
       if (result.status === "rejected") {
         const message = result.reason instanceof Error ? result.reason.message : String(result.reason);
         return `${dataset}: ${message}`;
       }
       if (result.value.error) return `${dataset}: ${result.value.error.message}`;
       if (index === 0) setUmkm([]);
+      else if (index === 1) setBusinessTypes([]);
       else setEconomy([]);
       return null;
     }).filter((error): error is string => error !== null);
@@ -387,7 +563,7 @@ export default function HomePage() {
     if (errors.length > 0) {
       return notify(`Pembersihan tidak selesai: ${errors.join("; ")}`, "error");
     }
-    notify("Semua data UMKM dan Ekonomi desa berhasil dihapus. Data titik lapangan tetap tersimpan.");
+    notify("Semua data UMKM, jenis usaha per desa, dan Ekonomi desa berhasil dihapus. Data titik lapangan tetap tersimpan.");
   };
 
   const handleImportCsv = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -412,10 +588,12 @@ export default function HomePage() {
         ? ["nama", "desa", "kecamatan", "kategori", "latitude", "longitude", "nilai", "keterangan"]
         : activeTab === "umkm"
           ? ["desa", "kecamatan", "mikro", "kecil", "menengah", "sumber"]
+          : activeTab === "business-types"
+            ? ["desa", "kecamatan", "tahun", "kuliner", "fashion", "kerajinan", "agribisnis_perikanan", "perdagangan", "jasa_pariwisata", "ekonomi_kreatif_digital", "sumber"]
           : activeTab === "economy"
             ? ["desa", "kecamatan", "omzet", "tenaga_kerja", "investasi"]
             : null;
-      if (!requiredHeaders) throw new Error("Pilih tab Titik lapangan, Data UMKM, atau Ekonomi desa sebelum mengimpor.");
+      if (!requiredHeaders) throw new Error("Pilih tab data sebelum mengimpor.");
       const missingHeaders = requiredHeaders.filter((header) => !indexes.has(header));
       if (missingHeaders.length) throw new Error(`Kolom CSV tidak lengkap: ${missingHeaders.join(", ")}.`);
 
@@ -484,6 +662,37 @@ export default function HomePage() {
           .upsert(payloads, { onConflict: "user_id,village_code,year" }).select();
         if (error) throw new Error(`Data UMKM gagal diimpor: ${error.message}`);
         setUmkm((current) => mergeRecordsById(current, data));
+      } else if (activeTab === "business-types") {
+        const payloads: UmkmBusinessTypeInput[] = [];
+        const seenVillageYears = new Set<string>();
+        for (const [index, cells] of rows.slice(1).entries()) {
+          if (cells.length !== headers.length) throw new Error(`Jumlah kolom pada baris ${index + 2} tidak sesuai judul kolom.`);
+          const village = resolveVillage(get(cells, "desa"), get(cells, "kecamatan"));
+          if (!village) throw new Error(`Desa pada baris ${index + 2} tidak ditemukan atau nama desa ambigu.`);
+          const year = get(cells, "tahun");
+          const key = `${village.code}:${year}`;
+          if (seenVillageYears.has(key)) throw new Error(`Desa ${village.name} muncul lebih dari sekali pada tahun ${year}.`);
+          seenVillageYears.add(key);
+          const parsed = umkmBusinessTypeSchema.safeParse({
+            village_code: village.code,
+            year,
+            culinary: get(cells, "kuliner"),
+            fashion: get(cells, "fashion"),
+            handicraft: get(cells, "kerajinan"),
+            agribusiness_fisheries: get(cells, "agribisnis_perikanan"),
+            trade: get(cells, "perdagangan"),
+            services_tourism: get(cells, "jasa_pariwisata"),
+            creative_digital: get(cells, "ekonomi_kreatif_digital"),
+            source: get(cells, "sumber"),
+          });
+          if (!parsed.success) throw new Error(`Baris ${index + 2}: ${parsed.error.issues[0]?.message ?? "Data tidak valid."}`);
+          payloads.push(parsed.data);
+        }
+
+        const { data, error } = await supabase.from("umkm_business_type_records")
+          .upsert(payloads, { onConflict: "village_code,year" }).select();
+        if (error) throw new Error(`Jumlah jenis usaha gagal diimpor: ${error.message}`);
+        setBusinessTypes((current) => mergeRecordsById(current, data));
       } else {
         const year = new Date().getFullYear();
         const payloads: EconomyInput[] = [];
@@ -614,6 +823,22 @@ export default function HomePage() {
           row.description_medium,
         ];
       });
+    } else if (activeTab === "business-types") {
+      headings = [
+        "desa", "kecamatan", "tahun", "kuliner", "fashion", "kerajinan",
+        "agribisnis_perikanan", "perdagangan", "jasa_pariwisata",
+        "ekonomi_kreatif_digital", "sumber",
+      ];
+      rows = visibleBusinessTypes.map((row) => {
+        const village = villageByCode.get(row.village_code);
+        return [
+          village?.name ?? row.village_code,
+          village?.kecamatan ?? "",
+          String(row.year),
+          ...businessTypeFields.map(({ field }) => String(row[field])),
+          row.source,
+        ];
+      });
     } else if (activeTab === "economy") {
       headings = ["desa", "kecamatan", "omzet", "tenaga_kerja", "investasi"];
       rows = visibleEconomy.map((row) => {
@@ -642,9 +867,9 @@ export default function HomePage() {
   return (
     <main className="app">
       <header className="topbar">
-        <a className="brand" href="#" aria-label="Data Map MBD beranda">
+        <a className="brand" href="#" aria-label="Data Map UMKM MBD beranda">
           <span className="brand-mark"><MapPin size={20} fill="currentColor" /></span>
-          <span className="brand-copy"><strong>Data Map <em>MBD</em></strong><small>Maluku Barat Daya</small></span>
+          <span className="brand-copy"><strong>Data Map <em>UMKM MBD</em></strong><small>Maluku Barat Daya</small></span>
         </a>
         <div className="topbar-center"><span className="live-dot" /> Peta data wilayah <span className="topbar-divider">/</span> <span>17 kecamatan · 118 desa</span></div>
         <div className="topbar-actions">
@@ -667,8 +892,8 @@ export default function HomePage() {
             <div><p className="eyebrow">RUANG KERJA</p><h1>Pusat data MBD</h1></div>
           </div>
 
-          <nav className="sidebar-nav" aria-label="Jenis data">
-            {tabs.map(({ id, label, icon: Icon }) => (
+          <nav className={`sidebar-nav ${isVisitor ? "sidebar-nav--public" : isAdmin ? "sidebar-nav--admin" : ""}`} aria-label="Jenis data">
+            {navigationTabs.map(({ id, label, icon: Icon }) => (
               <button key={id} type="button" aria-pressed={activeTab === id} className={`nav-item ${activeTab === id ? "is-active" : ""}`} onClick={() => setActiveTab(id)}>
                 <Icon size={17} strokeWidth={1.9} /><span>{label}</span>
                 {id === "points" && <span className="nav-count">{points.length}</span>}
@@ -705,20 +930,20 @@ export default function HomePage() {
           <div className="page-heading">
             <div>
               <div className="breadcrumbs">Kabupaten Maluku Barat Daya <span>/</span> Data wilayah</div>
-              <h2>{tabs.find((tab) => tab.id === activeTab)?.label}</h2>
-              <p>Jelajahi dan kelola informasi lapangan per desa.</p>
+              <h2>{activeTab === "villages" ? "Pilih desa" : tabs.find((tab) => tab.id === activeTab)?.label}</h2>
+              <p>{activeTab === "dashboard" ? "Jelajahi data publik dan potensi desa Maluku Barat Daya." : activeTab === "villages" ? "Pilih desa untuk melihat ringkasan data dan lokasinya di peta." : isVisitor ? "Jelajahi peta wilayah dan sebaran data desa." : "Jelajahi dan kelola informasi lapangan per desa."}</p>
             </div>
             <div className="heading-actions">
               <span className="sync-status"><Cloud size={15} /> {isAdmin ? "Admin · tersinkron" : "Data bersama · hanya lihat"}</span>
-              {activeTab !== "map" && (
+              {activeTab === "points" || activeTab === "umkm" || activeTab === "business-types" || activeTab === "economy" ? (
                 <>
                   <button className="button button--quiet" onClick={downloadCsv}><ArrowDownToLine size={16} /> Ekspor CSV</button>
                   {isAdmin && <button className="button button--quiet" onClick={() => importInput.current?.click()} disabled={busy}><Upload size={16} /> {busy ? "Mengimpor…" : "Impor CSV"}</button>}
                   <input ref={importInput} type="file" accept=".csv,text/csv" onChange={(event) => void handleImportCsv(event)} hidden />
                 </>
-              )}
-              {isAdmin && (activeTab === "umkm" || activeTab === "economy") && <button className="button button--quiet" onClick={() => void handleClearBusinessData()} disabled={busy}><Trash2 size={16} /> Hapus UMKM &amp; ekonomi</button>}
-              {isAdmin && <button className="button button--primary" onClick={() => setEditor({ kind: activeTab === "umkm" ? "umkm" : activeTab === "economy" ? "economy" : "point", row: null })} disabled={busy}>
+              ) : null}
+              {isAdmin && (activeTab === "umkm" || activeTab === "business-types" || activeTab === "economy") && <button className="button button--quiet" onClick={() => void handleClearBusinessData()} disabled={busy}><Trash2 size={16} /> Hapus UMKM &amp; ekonomi</button>}
+              {isAdmin && (activeTab === "points" || activeTab === "umkm" || activeTab === "business-types" || activeTab === "economy") && <button className="button button--primary" onClick={() => setEditor({ kind: activeTab === "umkm" ? "umkm" : activeTab === "business-types" ? "business-types" : activeTab === "economy" ? "economy" : "point", row: null })} disabled={busy}>
                 <Plus size={17} /> Tambah data
               </button>}
             </div>
@@ -739,23 +964,168 @@ export default function HomePage() {
           )}
 
           <div className="summary-row">
-            <article className="summary-card"><span className="summary-icon summary-icon--blue"><MapPin size={17} /></span><div><span className="summary-label">Titik lapangan</span><strong>{numberFormat.format(points.length)}</strong></div><small>tersimpan</small></article>
-            <article className="summary-card"><span className="summary-icon summary-icon--green"><Store size={17} /></span><div><span className="summary-label">Catatan UMKM</span><strong>{numberFormat.format(visibleUmkm.length)}</strong></div><small>data desa</small></article>
-            <article className="summary-card"><span className="summary-icon summary-icon--amber"><Activity size={17} /></span><div><span className="summary-label">Catatan ekonomi</span><strong>{numberFormat.format(visibleEconomy.length)}</strong></div><small>semua sumber</small></article>
-            <article className="summary-card"><span className="summary-icon summary-icon--purple"><Users size={17} /></span><div><span className="summary-label">Cakupan wilayah</span><strong>118 <small>desa</small></strong></div><small>17 kecamatan</small></article>
+            <article className="summary-card"><span className="summary-icon summary-icon--blue"><MapPin size={17} /></span><div><span className="summary-label">Titik lapangan</span><strong>{numberFormat.format(visiblePoints.length)}</strong></div><small>titik publik</small></article>
+            <article className="summary-card"><span className="summary-icon summary-icon--green"><Store size={17} /></span><div><span className="summary-label">Usaha UMKM</span><strong>{numberFormat.format(umkmTotals.micro + umkmTotals.small + umkmTotals.medium)}</strong></div><small>rekap terbaru</small></article>
+            <article className="summary-card"><span className="summary-icon summary-icon--amber"><Activity size={17} /></span><div><span className="summary-label">Desa dengan data</span><strong>{numberFormat.format(reportingVillageCount)}</strong></div><small>dari 118 desa</small></article>
+            <article className="summary-card"><span className="summary-icon summary-icon--purple"><Users size={17} /></span><div><span className="summary-label">Wilayah MBD</span><strong>118 <small>desa</small></strong></div><small>17 kecamatan</small></article>
           </div>
 
+          {activeTab === "dashboard" && (
+            <div className="visitor-dashboard">
+              <section className="dashboard-hero">
+                <div className="dashboard-hero-copy">
+                  <span className="dashboard-kicker"><span className="live-dot" /> DASHBOARD PUBLIK</span>
+                  <h3>Kenali potensi Maluku Barat Daya</h3>
+                  <p>Jelajahi sebaran titik lapangan, data UMKM, dan perkembangan ekonomi desa dalam satu tempat.</p>
+                  <div className="dashboard-hero-actions">
+                    <button className="button button--light" onClick={() => setActiveTab("map")}><MapPin size={16} /> Jelajahi peta</button>
+                    <button className="dashboard-link" onClick={() => setActiveTab(isVisitor ? "villages" : "umkm")}>{isVisitor ? "Jelajahi desa" : "Lihat data UMKM"} <ArrowRight size={15} /></button>
+                  </div>
+                </div>
+                <div className="dashboard-region" aria-label="Cakupan: 17 kecamatan dan 118 desa">
+                  <span className="dashboard-region-count">17</span>
+                  <strong>Kecamatan</strong>
+                  <span className="dashboard-region-divider" />
+                  <span className="dashboard-region-count">118</span>
+                  <strong>Desa</strong>
+                </div>
+              </section>
+
+              <div className="dashboard-grid">
+                <section className="dashboard-card">
+                  <header className="dashboard-card-head">
+                    <div><h3>Komposisi UMKM</h3><p>Jumlah usaha pada rekap tahun terbaru tiap desa.</p></div>
+                    <span className="dashboard-total">{numberFormat.format(umkmTotals.micro + umkmTotals.small + umkmTotals.medium)} usaha</span>
+                  </header>
+                  <div className="dashboard-bars">
+                    {([
+                      { key: "micro", label: "Mikro", color: "micro" },
+                      { key: "small", label: "Kecil", color: "small" },
+                      { key: "medium", label: "Menengah", color: "medium" },
+                    ] as const).map(({ key, label, color }) => {
+                      const total = umkmTotals[key];
+                      const allBusinesses = umkmTotals.micro + umkmTotals.small + umkmTotals.medium;
+                      const share = allBusinesses > 0 ? (total / allBusinesses) * 100 : 0;
+                      return (
+                        <div className="dashboard-bar-row" key={key}>
+                          <div className="dashboard-bar-label"><span><i className={`dashboard-bar-dot dashboard-bar-dot--${color}`} />{label}</span><strong>{numberFormat.format(total)}</strong></div>
+                          <div className="dashboard-bar-track" role="img" aria-label={`${label}: ${numberFormat.format(total)} usaha, ${share.toFixed(1)} persen`}>
+                            <span className={`dashboard-bar-fill dashboard-bar-fill--${color}`} style={{ width: `${share}%` }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <footer className="dashboard-card-foot">{loadingData ? "Memuat data terbaru…" : `${numberFormat.format(latestUmkm.length)} desa memiliki rekap UMKM.`}</footer>
+                </section>
+
+                <section className="dashboard-card">
+                  <header className="dashboard-card-head">
+                    <div><h3>Sorotan ekonomi desa</h3><p>Akumulasi catatan tahun terbaru pada tiap desa.</p></div>
+                    <button className="dashboard-link dashboard-card-link" onClick={() => setActiveTab("economy")}>Detail <ArrowRight size={15} /></button>
+                  </header>
+                  <div className="dashboard-economy">
+                    <div><span>Tenaga kerja tercatat</span><strong>{numberFormat.format(economyTotals.workers)}</strong></div>
+                    <div><span>Omzet tercatat</span><strong>{compactCurrency.format(economyTotals.turnover)}</strong></div>
+                    <div><span>Investasi tercatat</span><strong>{compactCurrency.format(economyTotals.investment)}</strong></div>
+                  </div>
+                  <footer className="dashboard-card-foot">{loadingData ? "Memuat data terbaru…" : `${numberFormat.format(latestEconomy.length)} desa memiliki rekap ekonomi.`}</footer>
+                </section>
+              </div>
+
+              <section className="dashboard-card dashboard-recent">
+                <header className="dashboard-card-head">
+                  <div><h3>Pembaruan UMKM terbaru</h3><p>Data per desa yang terakhir diperbarui.</p></div>
+                  <button className="dashboard-link dashboard-card-link" onClick={() => setActiveTab("umkm")}>Semua data UMKM <ArrowRight size={15} /></button>
+                </header>
+                {latestUmkmForDisplay.length > 0 ? (
+                  <ul className="dashboard-recent-list">
+                    {latestUmkmForDisplay.map((row) => {
+                      const village = villageByCode.get(row.village_code);
+                      return (
+                        <li key={row.id}>
+                          <span className="dashboard-recent-icon"><Store size={16} /></span>
+                          <span className="dashboard-recent-village"><strong>{village?.name ?? row.village_code}</strong><small>{village?.kecamatan ?? "Wilayah MBD"}</small></span>
+                          <span className="dashboard-recent-total">{numberFormat.format(row.micro + row.small + row.medium)} usaha</span>
+                          <span className="dashboard-recent-year">Tahun {row.year}</span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : (
+                  <div className="dashboard-empty">{loadingData ? "Memuat pembaruan data…" : "Belum ada rekap UMKM yang dapat ditampilkan."}</div>
+                )}
+              </section>
+            </div>
+          )}
+
+          {activeTab === "villages" && isVisitor && (
+            <section className="village-directory">
+              <header className="village-directory-head">
+                <div>
+                  <h3>Pilih desa untuk melihat datanya</h3>
+                  <p>Pilih desa untuk membuka peta tepat pada wilayahnya dan melihat ringkasan usaha serta ekonomi.</p>
+                </div>
+                <span className="records-count">{numberFormat.format(visibleVillages.length)} desa</span>
+              </header>
+              {villages && visibleVillages.length > 0 ? (
+                <div className="village-directory-grid">
+                  {visibleVillages.map((village) => (
+                    <button className="village-option" key={village.code} onClick={() => selectVillage(village)}>
+                      <span className="village-option-icon"><Building2 size={17} /></span>
+                      <span className="village-option-copy"><strong>{village.name}</strong><small>{village.kecamatan}</small></span>
+                      <ArrowRight size={16} className="village-option-arrow" />
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="empty-state">
+                  <span className="empty-icon"><Search size={20} /></span>
+                  <strong>{villages ? "Desa tidak ditemukan. Coba ubah pencarian atau filter kecamatan." : "Memuat daftar desa…"}</strong>
+                </div>
+              )}
+            </section>
+          )}
+
           {activeTab === "map" && (
+            <>
+            {isVisitor && selectedVillage && (
+              <section className="village-detail" aria-labelledby="selected-village-title">
+                <header className="village-detail-head">
+                  <div>
+                    <p className="eyebrow">RINGKASAN DESA</p>
+                    <h3 id="selected-village-title">{selectedVillage.name}</h3>
+                    <p>{selectedVillage.kecamatan} · {selectedVillage.areaKm2.toLocaleString("id-ID", { maximumFractionDigits: 2 })} km²</p>
+                  </div>
+                  <button className="button button--quiet button--small" onClick={() => setActiveTab("villages")}>Pilih desa lain</button>
+                </header>
+                <div className="village-metrics">
+                  <article><span>Usaha mikro</span><strong>{selectedVillageUmkm ? numberFormat.format(selectedVillageUmkm.micro) : "—"}</strong><small>{selectedVillageUmkm ? `Data ${selectedVillageUmkm.year}` : "Belum ada data"}</small></article>
+                  <article><span>Usaha kecil</span><strong>{selectedVillageUmkm ? numberFormat.format(selectedVillageUmkm.small) : "—"}</strong><small>{selectedVillageUmkm ? `Data ${selectedVillageUmkm.year}` : "Belum ada data"}</small></article>
+                  <article><span>Usaha menengah</span><strong>{selectedVillageUmkm ? numberFormat.format(selectedVillageUmkm.medium) : "—"}</strong><small>{selectedVillageUmkm ? `Data ${selectedVillageUmkm.year}` : "Belum ada data"}</small></article>
+                  <article><span>Investasi tercatat</span><strong>{selectedVillageEconomy ? compactCurrency.format(selectedVillageEconomy.investment) : "—"}</strong><small>{selectedVillageEconomy ? `Data ${selectedVillageEconomy.year}` : "Belum ada data"}</small></article>
+                  <article><span>Tenaga kerja</span><strong>{selectedVillageEconomy ? numberFormat.format(selectedVillageEconomy.workers) : "—"}</strong><small>{selectedVillageEconomy ? `Data ${selectedVillageEconomy.year}` : "Belum ada data"}</small></article>
+                  {businessTypeFields.map(({ field, label }) => (
+                    <article key={field}>
+                      <span>{label}</span>
+                      <strong>{selectedVillageBusinessTypes ? numberFormat.format(selectedVillageBusinessTypes[field]) : "—"}</strong>
+                      <small>{selectedVillageBusinessTypes ? `Data ${selectedVillageBusinessTypes.year}` : "Belum ada data"}</small>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            )}
             <div className="map-card">
               <div className="map-card-head">
                 <div><div className="section-title"><span className="map-pulse" /> Peta sebaran</div><p>Batas desa dan titik lapangan tersimpan.</p></div>
                 <div className="map-legend"><span><i className="legend-district" /> Kecamatan</span><span><i className="legend-village" /> Desa</span><span><i className="legend-point legend-point--mikro" /> Mikro</span><span><i className="legend-point legend-point--kecil" /> Kecil</span><span><i className="legend-point legend-point--menengah" /> Menengah</span></div>
               </div>
               <div className="map-frame">
-                <MapCanvas villages={villages} points={visiblePoints} umkm={umkm} villageByCode={villageByCode} canEdit={isAdmin && !busy} onMovePoint={handleMovePoint} />
+                <MapCanvas villages={villages} points={villageMapPoints} umkm={villageMapUmkm} villageByCode={villageByCode} canEdit={isAdmin && !busy} onMovePoint={handleMovePoint} selectedVillageCode={isVisitor ? selectedVillageCode : null} />
               </div>
-              <div className="map-foot"><span><Layers3 size={15} /> Batas administrasi 17 kecamatan / 118 desa</span><span>{visiblePoints.length} titik lapangan · pin UMKM mengikuti data terbaru per desa</span></div>
+              <div className="map-foot"><span><Layers3 size={15} /> Batas administrasi 17 kecamatan / 118 desa</span><span>{villageMapPoints.length} titik lapangan · pin UMKM mengikuti data terbaru per desa</span></div>
             </div>
+            </>
           )}
 
           {activeTab === "points" && (
@@ -775,6 +1145,31 @@ export default function HomePage() {
                 {visibleUmkm.map((row) => {
                   const village = villageByCode.get(row.village_code);
                   return <tr key={row.id}><td><strong>{village?.name ?? row.village_code}</strong><small className="row-note">{village?.kecamatan}</small></td><td>{numberFormat.format(row.micro)}</td><td>{numberFormat.format(row.small)}</td><td>{numberFormat.format(row.medium)}</td><td><strong>{numberFormat.format(row.micro + row.small + row.medium)}</strong></td><td>{row.source || "—"}</td>{isAdmin && <td><RowActions onEdit={() => setEditor({ kind: "umkm", row })} onDelete={() => void handleDelete("umkm", row.id)} /></td>}</tr>;
+                })}
+              </tbody></table></div>
+            </DataCard>
+          )}
+
+          {activeTab === "business-types" && isAdmin && (
+            <DataCard title="Jumlah jenis usaha per desa" description="Jumlah usaha pada tujuh kategori untuk setiap desa dan tahun." count={visibleBusinessTypes.length} loading={loadingData} emptyText="Belum ada jumlah jenis usaha. Tambahkan rekap per desa." canEdit={isAdmin} onAdd={() => setEditor({ kind: "business-types", row: null })}>
+              <div className="data-table-wrap"><table><thead><tr>
+                <th>Desa / kecamatan</th><th>Tahun</th>
+                {businessTypeFields.map(({ field, label }) => <th key={field}>{label}</th>)}
+                <th>Total usaha</th><th>Sumber</th><th>Aksi</th>
+              </tr></thead><tbody>
+                {visibleBusinessTypes.map((row) => {
+                  const village = villageByCode.get(row.village_code);
+                  const total = businessTypeFields.reduce((sum, { field }) => sum + row[field], 0);
+                  return (
+                    <tr key={row.id}>
+                      <td><strong>{village?.name ?? row.village_code}</strong><small className="row-note">{village?.kecamatan}</small></td>
+                      <td>{row.year}</td>
+                      {businessTypeFields.map(({ field }) => <td key={field}>{numberFormat.format(row[field])}</td>)}
+                      <td><strong>{numberFormat.format(total)}</strong></td>
+                      <td>{row.source || "—"}</td>
+                      <td><RowActions onEdit={() => setEditor({ kind: "business-types", row })} onDelete={() => void handleDelete("business-types", row.id)} /></td>
+                    </tr>
+                  );
                 })}
               </tbody></table></div>
             </DataCard>
@@ -804,6 +1199,7 @@ export default function HomePage() {
           onClose={() => setEditor(null)}
           onSavePoint={handleSavePoint}
           onSaveUmkm={handleSaveUmkm}
+          onSaveBusinessTypes={handleSaveBusinessTypes}
           onSaveEconomy={handleSaveEconomy}
         />
       )}
@@ -862,6 +1258,33 @@ function mergeRecordsById<T extends { id: string }>(current: T[], updates: T[]):
   ];
 }
 
+function latestByVillage<T extends { village_code: string; year: number }>(records: T[]): T[] {
+  const latest = new Map<string, T>();
+  for (const record of records) {
+    const current = latest.get(record.village_code);
+    if (!current || record.year > current.year) latest.set(record.village_code, record);
+  }
+  return [...latest.values()];
+}
+
+const dataPageSize = 1000;
+
+async function loadAllPages<T>(
+  fetchPage: (from: number, to: number) => PromiseLike<{
+    data: T[] | null;
+    error: { message: string } | null;
+  }>,
+): Promise<{ data: T[]; error: { message: string } | null }> {
+  const records: T[] = [];
+  for (let from = 0; ; from += dataPageSize) {
+    const { data, error } = await fetchPage(from, from + dataPageSize - 1);
+    if (error) return { data: records, error };
+    const page = data ?? [];
+    records.push(...page);
+    if (page.length < dataPageSize) return { data: records, error: null };
+  }
+}
+
 function DataCard({
   title, description, count, loading, emptyText, canEdit, onAdd, children,
 }: {
@@ -882,7 +1305,7 @@ function RowActions({ onEdit, onDelete }: { onEdit: () => void; onDelete: () => 
 }
 
 function EditorModal({
-  editor, villages, busy, onClose, onSavePoint, onSaveUmkm, onSaveEconomy,
+  editor, villages, busy, onClose, onSavePoint, onSaveUmkm, onSaveBusinessTypes, onSaveEconomy,
   villageGeoJson,
 }: {
   editor: Editor;
@@ -892,12 +1315,20 @@ function EditorModal({
   onClose: () => void;
   onSavePoint: (input: PointInput, id: string | null) => Promise<void>;
   onSaveUmkm: (input: UmkmInput, id: string | null) => Promise<void>;
+  onSaveBusinessTypes: (input: UmkmBusinessTypeInput, id: string | null) => Promise<void>;
   onSaveEconomy: (input: EconomyInput, id: string | null) => Promise<void>;
 }) {
-  const row = editor.row as MapPoint | UmkmRecord | EconomyRecord | null;
+  const row = editor.row as MapPoint | UmkmRecord | UmkmBusinessTypeRecord | EconomyRecord | null;
   const [errors, setErrors] = useState<string[]>([]);
   const [villageCode, setVillageCode] = useState(row?.village_code ?? "");
-  const title = `${row ? "Edit" : "Tambah"} ${editor.kind === "point" ? "titik lapangan" : editor.kind === "umkm" ? "data UMKM" : "data ekonomi"}`;
+  const editorLabel = editor.kind === "point"
+    ? "titik lapangan"
+    : editor.kind === "umkm"
+      ? "data UMKM"
+      : editor.kind === "business-types"
+        ? "jumlah jenis usaha"
+        : "data ekonomi";
+  const title = `${row ? "Edit" : "Tambah"} ${editorLabel}`;
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape" && !busy) onClose(); };
@@ -928,6 +1359,13 @@ function EditorModal({
       await onSaveUmkm(parsed.data, editor.row?.id ?? null);
       return;
     }
+    if (editor.kind === "business-types") {
+      const parsed = umkmBusinessTypeSchema.safeParse({ ...values, village_code: villageCode });
+      if (!parsed.success) return setErrors(parsed.error.issues.map((issue) => issue.message));
+      setErrors([]);
+      await onSaveBusinessTypes(parsed.data, editor.row?.id ?? null);
+      return;
+    }
     const year = editor.row?.year ?? new Date().getFullYear();
     const parsed = economySchema.safeParse({ ...values, village_code: villageCode, year });
     if (!parsed.success) return setErrors(parsed.error.issues.map((issue) => issue.message));
@@ -943,6 +1381,7 @@ function EditorModal({
           <label className="field"><span>Desa / kelurahan <b>*</b></span><select value={villageCode} onChange={(event) => setVillageCode(event.target.value)} required><option value="" disabled>Pilih desa</option>{villages.map((village) => <option key={village.code} value={village.code}>{village.name} · {village.kecamatan}</option>)}</select></label>
           {editor.kind === "point" && <PointFields row={editor.row} />}
           {editor.kind === "umkm" && <UmkmFields row={editor.row} />}
+          {editor.kind === "business-types" && <BusinessTypeFields row={editor.row} />}
           {editor.kind === "economy" && <EconomyFields row={editor.row} />}
           {errors.length > 0 && <div className="form-errors" role="alert">{errors.map((error, index) => <p key={`${index}-${error}`}>{error}</p>)}</div>}
           <div className="dialog-actions"><button type="button" className="button button--quiet" onClick={onClose} disabled={busy}>Batal</button><button type="submit" className="button button--primary" disabled={busy || villages.length === 0}>{busy ? "Menyimpan…" : "Simpan perubahan"}</button></div>
@@ -970,6 +1409,21 @@ function UmkmFields({ row }: { row: UmkmRecord | null }) {
     <label className="field"><span>Deskripsi pin mikro</span><textarea name="description_micro" rows={3} maxLength={500} defaultValue={row?.description_micro ?? ""} placeholder="Keterangan khusus untuk pin usaha mikro…" /></label>
     <label className="field"><span>Deskripsi pin kecil</span><textarea name="description_small" rows={3} maxLength={500} defaultValue={row?.description_small ?? ""} placeholder="Keterangan khusus untuk pin usaha kecil…" /></label>
     <label className="field"><span>Deskripsi pin menengah</span><textarea name="description_medium" rows={3} maxLength={500} defaultValue={row?.description_medium ?? ""} placeholder="Keterangan khusus untuk pin usaha menengah…" /></label>
+  </>;
+}
+
+function BusinessTypeFields({ row }: { row: UmkmBusinessTypeRecord | null }) {
+  return <>
+    <label className="field"><span>Tahun data <b>*</b></span><input name="year" type="number" min="2000" max="2100" step="1" defaultValue={row?.year ?? new Date().getFullYear()} required /></label>
+    <div className="field-grid field-grid--three">
+      {businessTypeFields.map(({ field, label }) => (
+        <label className="field" key={field}>
+          <span>{label}</span>
+          <input name={field} type="number" min="0" step="1" defaultValue={row?.[field] ?? 0} required />
+        </label>
+      ))}
+    </div>
+    <label className="field"><span>Sumber data</span><input name="source" maxLength={160} defaultValue={row?.source ?? ""} placeholder="Contoh: Pendataan desa" /></label>
   </>;
 }
 

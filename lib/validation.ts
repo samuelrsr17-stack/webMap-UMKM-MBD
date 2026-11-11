@@ -56,9 +56,33 @@ export const economySchema = z.object({
   investment: nonNegativeNumber("Investasi"),
 });
 
+export const businessTypeFields = [
+  { field: "culinary", label: "Kuliner atau Makanan dan Minuman" },
+  { field: "fashion", label: "Fashion / Tekstil & Konveksi" },
+  { field: "handicraft", label: "Kerajinan Tangan (Handicraft) & Seni" },
+  { field: "agribusiness_fisheries", label: "Agribisnis & Perikanan" },
+  { field: "trade", label: "Perdagangan (Retail & Grosir)" },
+  { field: "services_tourism", label: "Jasa & Pariwisata" },
+  { field: "creative_digital", label: "Ekonomi Kreatif & Digital" },
+] as const;
+
+export const umkmBusinessTypeSchema = z.object({
+  village_code: cleanText(20, "Desa"),
+  year: z.coerce.number().int().min(2000).max(new Date().getFullYear() + 1),
+  culinary: nonNegativeNumber("Kuliner atau Makanan dan Minuman", true),
+  fashion: nonNegativeNumber("Fashion / Tekstil & Konveksi", true),
+  handicraft: nonNegativeNumber("Kerajinan Tangan & Seni", true),
+  agribusiness_fisheries: nonNegativeNumber("Agribisnis & Perikanan", true),
+  trade: nonNegativeNumber("Perdagangan (Retail & Grosir)", true),
+  services_tourism: nonNegativeNumber("Jasa & Pariwisata", true),
+  creative_digital: nonNegativeNumber("Ekonomi Kreatif & Digital", true),
+  source: z.string().trim().max(160, "Sumber maksimal 160 karakter."),
+});
+
 export type PointInput = z.infer<typeof pointSchema>;
 export type UmkmInput = z.infer<typeof umkmSchema>;
 export type EconomyInput = z.infer<typeof economySchema>;
+export type UmkmBusinessTypeInput = z.infer<typeof umkmBusinessTypeSchema>;
 
 export const categoryLabels: Record<PointCategory, string> = {
   mikro: "Mikro",

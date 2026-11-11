@@ -37,6 +37,22 @@ export type UmkmRecord = {
   updated_at: string;
 };
 
+export type UmkmBusinessTypeRecord = {
+  id: string;
+  user_id: string;
+  village_code: string;
+  year: number;
+  culinary: number;
+  fashion: number;
+  handicraft: number;
+  agribusiness_fisheries: number;
+  trade: number;
+  services_tourism: number;
+  creative_digital: number;
+  source: string;
+  updated_at: string;
+};
+
 export type EconomyRecord = {
   id: string;
   user_id: string;
@@ -72,6 +88,11 @@ export type Database = {
         UmkmRecord,
         Omit<UmkmRecord, "id" | "user_id" | "updated_at">,
         Partial<Omit<UmkmRecord, "id" | "user_id" | "updated_at">>
+      >;
+      umkm_business_type_records: Table<
+        UmkmBusinessTypeRecord,
+        Omit<UmkmBusinessTypeRecord, "id" | "user_id" | "updated_at">,
+        Partial<Omit<UmkmBusinessTypeRecord, "id" | "user_id" | "updated_at">>
       >;
       economy_records: Table<
         EconomyRecord,

@@ -14,6 +14,7 @@ interface MapCanvasProps {
   villageByCode: ReadonlyMap<string, VillageProperties>;
   canEdit: boolean;
   onMovePoint: (id: string, lat: number, lng: number) => Promise<boolean>;
+  selectedVillageCode?: string | null;
 }
 
 const umkmCategories = [
@@ -22,18 +23,35 @@ const umkmCategories = [
   { field: "medium", descriptionField: "description_medium", category: "menengah", label: "Menengah", offset: 16 },
 ] as const;
 
-function FitMbdBounds({ villages }: { villages: VillageCollection | null }) {
+function FitMbdBounds({
+  villages,
+  selectedVillageCode,
+}: {
+  villages: VillageCollection | null;
+  selectedVillageCode: string | null;
+}) {
   const map = useMap();
   useEffect(() => {
     if (!villages || villages.features.length === 0) return;
-    const layer = L.geoJSON(villages);
+    const selectedVillage = selectedVillageCode
+      ? villages.features.find((feature) => feature.properties.code === selectedVillageCode)
+      : undefined;
+    const layer = L.geoJSON(selectedVillage ?? villages);
     const bounds = layer.getBounds();
-    if (bounds.isValid()) map.fitBounds(bounds, { padding: [28, 28], maxZoom: 10 });
-  }, [map, villages]);
+    if (bounds.isValid()) map.fitBounds(bounds, { padding: [28, 28], maxZoom: selectedVillage ? 13 : 10 });
+  }, [map, selectedVillageCode, villages]);
   return null;
 }
 
-export default function MbdMap({ villages, points, umkm, villageByCode, canEdit, onMovePoint }: MapCanvasProps) {
+export default function MbdMap({
+  villages,
+  points,
+  umkm,
+  villageByCode,
+  canEdit,
+  onMovePoint,
+  selectedVillageCode = null,
+}: MapCanvasProps) {
   const latestUmkmByVillage = new Map<string, UmkmRecord>();
   for (const record of umkm) {
     const current = latestUmkmByVillage.get(record.village_code);
@@ -59,21 +77,24 @@ export default function MbdMap({ villages, points, umkm, villageByCode, canEdit,
       {villages && (
         <>
           <GeoJSON
-            key="mbd-villages"
+            key={selectedVillageCode ? `mbd-villages-${selectedVillageCode}` : "mbd-villages"}
             data={villages}
-            style={(feature) => ({
-              color: "#238877",
-              weight: 1.15,
-              opacity: 0.9,
-              fillColor: districtColor((feature as Feature<Geometry, VillageProperties> | undefined)?.properties.kecCode ?? ""),
-              fillOpacity: 0.24,
-            })}
+            style={(feature) => {
+              const isSelected = (feature as Feature<Geometry, VillageProperties> | undefined)?.properties.code === selectedVillageCode;
+              return {
+                color: isSelected ? "#126f5d" : "#238877",
+                weight: isSelected ? 2.4 : 1.15,
+                opacity: 0.9,
+                fillColor: districtColor((feature as Feature<Geometry, VillageProperties> | undefined)?.properties.kecCode ?? ""),
+                fillOpacity: isSelected ? 0.42 : 0.24,
+              };
+            }}
             onEachFeature={(feature, layer) => {
               const properties = feature.properties as VillageProperties;
               layer.bindTooltip(`${properties.name} · ${properties.kecamatan}`, { sticky: true });
             }}
           />
-          <FitMbdBounds villages={villages} />
+          <FitMbdBounds villages={villages} selectedVillageCode={selectedVillageCode} />
         </>
       )}
 
